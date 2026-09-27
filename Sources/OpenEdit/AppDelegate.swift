@@ -83,8 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowControllers.removeAll { $0.window === window }
     }
 
-    /// File paths supplied as launch arguments (Xcode scheme arguments, or
-    /// `open -na OpenEdit.app --args /path/to/file`, per ARCHITECTURE.md 5.1).
+    /// File paths supplied as launch arguments (e.g. `swift run OpenEdit <path>`
+    /// or `open -n OpenEdit.app --args <path>`, per ARCHITECTURE.md 5.1).
     private func launchArgumentURLs() -> [URL] {
         CommandLine.arguments.dropFirst().compactMap { argument in
             guard !argument.hasPrefix("-") else { return nil }
