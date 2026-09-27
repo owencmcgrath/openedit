@@ -12,7 +12,7 @@ A native macOS text editor, launched from the CLI (`openedit <file>`), that beha
 - No built-in terminal, git integration, task runner, or extension marketplace
 - No Mac App Store distribution, no App Sandbox
 - No three-way merge or diff view for external-edit conflicts
-- No code completion or go-to-definition (limited value without a real project root anyway)
+- No code completion or go-to-definition (limited value without a real project root anyway) — including AI-assisted completion (e.g. Apple's Foundation Models framework, considered and explicitly passed on): the point of this app is to open and edit files an agent is touching, not to be the place you write code from scratch
 - Not optimized for very large files — correctness and simplicity over perf at this stage
 - No bundled language runtimes (Node, Python, Ruby, Go), and no automatic installation of language servers — the app never runs package-manager commands on the user's behalf; at most it tells the user what to run
 
@@ -22,6 +22,13 @@ A native macOS text editor, launched from the CLI (`openedit <file>`), that beha
 - Distribution: **[Decided]** Developer ID signing + notarization, no App Store
 - Channels: **[Decided]** Homebrew (personal tap initially, e.g. `brew install user/tap/openedit`), GitHub Releases as the canonical artifact, a website offering an optional DMG for non-brew users
 - Auto-update: Sparkle for DMG installs; suppressed at launch when the running app's path indicates a Homebrew Caskroom install, deferring to `brew upgrade` instead
+
+### 3.1 Build Tooling
+
+- **[Decided]** Swift Package Manager project (`Package.swift`), not an `.xcodeproj` — no Interface Builder/storyboards, no Xcode.app required for local development. Everything in this doc already assumes code-driven AppKit (`NSRulerView`, `NSTextFinder`, programmatic window setup), so nothing depends on `.xib` files.
+- Local build/run via `swift build` / `swift run`. `swift build` produces a bare executable, not a proper `.app` bundle (no `Info.plist`, no icon, no bundle structure) — a small packaging script (or a tool built for this, e.g. `swift-bundler`) assembles the actual `.app` after building.
+- Code signing and notarization (`codesign`, `xcrun notarytool`, `xcrun stapler`) are CLI tools bundled with Command Line Tools, not gated behind the full Xcode IDE — the Developer ID + notarization pipeline (Section 9, task 9) is unaffected by not having Xcode installed locally.
+- CI is not bound by this: GitHub Actions' macOS runners ship full Xcode pre-installed, so CI can use it if that's simplest there, independent of the local no-Xcode preference.
 
 ## 4. Component Map
 
@@ -87,6 +94,8 @@ These are the seams between components — pin these down precisely since they l
 ### 5.8 Appearance / Theming
 
 **[Decided]** No custom theme engine, no user-selectable color schemes in v1 — the app follows system light/dark appearance everywhere, full stop, in service of feeling as much like a native macOS app as possible. Concretely: syntax highlighting maps tree-sitter token types to AppKit's *dynamic* system colors (`NSColor.labelColor`, `.systemBlue`, `.systemGreen`, `.systemPurple`, `.secondaryLabelColor`, etc.) rather than hardcoded hex values — dynamic colors automatically resolve to the right value for the current appearance, so highlighting adapts to Dark Mode with zero extra code. Window chrome, the gutter, and diagnostics coloring (5.9) follow the same rule.
+
+**[Decided]** Standard, unmodified `NSWindow` title-bar chrome — no custom-drawn traffic lights, no `titlebarAppearsTransparent` tricks. This means OS-level window-chrome redesigns (e.g. macOS 27's Liquid Glass traffic light buttons) are inherited automatically with zero app-side code, in both AppKit and SwiftUI, since both sit on the same underlying `NSWindow`. Custom traffic lights would trade that free upkeep for a copy the app has to maintain and re-match every time Apple changes the design. Window chrome, the gutter, and diagnostics coloring (5.9) follow the same rule.
 
 ### 5.9 Diagnostics
 
