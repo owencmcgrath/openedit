@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# openedit — CLI shim for OpenEdit.app (ARCHITECTURE.md 5.1).
+#
+# Fire-and-forget: hands each file to the running OpenEdit instance (or
+# launches one) via LaunchServices and exits as soon as `open` returns.
+# Paths are made absolute and checked here because the Apple Event target
+# resolves relative paths against the app's CWD, not the caller's.
+#
+# The app is launched with `open -a` (no -n): -n forces a second process,
+# which breaks instance reuse, and `--args` are ignored when an instance is
+# already running, so files are passed as open-document arguments instead.
+#
+# A blocking $EDITOR mode is deferred (ARCHITECTURE.md 5.1/8); the arg loop
+# below is where a flag like --wait slots in later without reshaping this
+# script.
+
+set -u
+
+usage() {
+    echo "usage: openedit [file ...]" >&2
+    exit 2
+}
+
+app_path() {
+    # 1. Explicit override — how packaging (e.g. a Homebrew cask, Build
+    #    Sequence item 10) will point the shim at its app location.
+    if [[ -n "${OPENEDIT_APP:-}" && -d "$OPENEDIT_APP" ]]; then
+        printf '%s' "$OPENEDIT_APP"
+        return 0
+    fi
+    # 2. Dev checkout: the bundle sits next to this script in build/.
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -d "$script_dir/../build/OpenEdit.app" ]]; then
+        printf '%s' "$script_dir/../build/OpenEdit.app"
+        return 0
+    fi
+    # 3. Standard install locations.
+    local candidate
+    for candidate in "/Applications/OpenEdit.app" "$HOME/Applications/OpenEdit.app"; do
+        if [[ -d "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+files=()
+for argument in "$@"; do
+    case "$argument" in
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "openedit: unsupported option: $argument" >&2
+            usage
+            ;;
+        *)
+            if [[ "$argument" != /* ]]; then
+                argument="$PWD/$argument"
+            fi
+            if [[ ! -e "$argument" ]]; then
+                echo "openedit: no such file: $argument" >&2
+                exit 1
+            fi
+            if [[ -d "$argument" ]]; then
+                echo "openedit: not a file: $argument" >&2
+                exit 1
+            fi
+            files+=("$argument")
+            ;;
+    esac
+done
+
+APP="$(app_path)"
+if [[ -z "$APP" ]]; then
+    echo "openedit: OpenEdit.app not found; set OPENEDIT_APP or install the app" >&2
+    exit 1
+fi
+
+if [[ ${#files[@]} -eq 0 ]]; then
+    exec open -a "$APP"
+fi
+
+exec open -a "$APP" "${files[@]}"
