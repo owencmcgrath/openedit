@@ -1,20 +1,27 @@
 CONFIGURATION ?= release
 
-.PHONY: build run bundle open clean
+.PHONY: build exec bundle run open clean
 
 build:
 	swift build -c $(CONFIGURATION)
 
-# Local dev run (bare executable, no bundle). Optional: make run FILE=/path/to/file
-run:
+# Bare executable via `swift run`. Fast, but macOS won't let a shell-exec'd
+# process become the active app, so the window renders inactive (dull traffic
+# lights) and application(_:open:)/single-instance behavior is unavailable.
+# Optional: make exec FILE=/path/to/file
+exec:
 	swift run -c $(CONFIGURATION) OpenEdit $(FILE)
 
 bundle:
 	./Scripts/build-app.sh $(CONFIGURATION)
 
-# Launch the bundled .app. Needed for application(_:open:)/single-instance reuse.
-# Optional: make open FILE=/path/to/file
-open: bundle
+# Normal way to run the app: bundle it, then launch through LaunchServices so
+# it activates and gets standard window chrome.
+# Optional: make run FILE=/path/to/file
+run: bundle
+	open -n build/OpenEdit.app --args $(FILE)
+
+open:
 	open -n build/OpenEdit.app --args $(FILE)
 
 clean:
