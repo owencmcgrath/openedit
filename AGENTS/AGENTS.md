@@ -20,15 +20,15 @@ Instructions for any coding agent working in this repository.
 
 ## Git Workflow
 
-**Never commit directly to `main`.** `main` only ever receives merges from `v1.0.0` at an actual release cut — nothing else lands there directly, agent or human.
+**Never commit directly to `main`.** `main` only ever receives merges from `release/v1.0.0` at an actual release cut — nothing else lands there directly, agent or human.
 
-- All work happens on a branch off `v1.0.0`, merged back into `v1.0.0` via PR. `v1.0.0` is the integration branch; `main` reflects only what's actually been shipped.
+- All work happens on a branch off `release/v1.0.0`, merged back into `release/v1.0.0` via PR. `release/v1.0.0` is the integration branch; `main` reflects only what's actually been shipped.
 - Branch naming mirrors Conventional Commit types: `<type>/<short-kebab-description>`, e.g. `feature/line-number-gutter`, `fix/notification-permission-crash`, `chore/update-tree-sitter-swift`.
   - Types: `feature`, `fix`, `chore`, `refactor`, `docs`, `test`, `perf`, `ci`, `build`
   - Keep the description short and specific — prefer `feature/lsp-idle-linger-timeout` over `feature/lsp-stuff`
   - When a branch corresponds to a numbered Build Sequence task, it's fine (encouraged, even) to reference it: `feature/02-cli-shell-wrapper`
-- Open a PR from the feature/fix branch **into `v1.0.0`**, never into `main`. Rebase or merge `v1.0.0` into your branch to resolve conflicts before requesting merge, don't force-push over shared history.
-- Squash-merge PRs into `v1.0.0` with a Conventional Commit message summarizing the whole change (see below) — keep `v1.0.0`'s history readable even if the branch itself had messy WIP commits.
+- Open a PR from the feature/fix branch **into `release/v1.0.0`**, never into `main`. Rebase or merge `release/v1.0.0` into your branch to resolve conflicts before requesting merge, don't force-push over shared history.
+- Squash-merge PRs into `release/v1.0.0` with a Conventional Commit message summarizing the whole change (see below) — keep `release/v1.0.0`'s history readable even if the branch itself had messy WIP commits.
 
 ## Conventional Commits
 
@@ -65,7 +65,7 @@ the reload prompt more than once.
 
 ## PR Checklist
 
-Before opening a PR against `v1.0.0`:
+Before opening a PR against `release/v1.0.0`:
 
 - [ ] Branch is named `<type>/<description>` per the convention above
 - [ ] Commit message(s) follow Conventional Commits
