@@ -1,6 +1,7 @@
 CONFIGURATION ?= release
+PREFIX ?= /usr/local
 
-.PHONY: build exec bundle run open clean
+.PHONY: build exec bundle run open install-cli uninstall-cli clean
 
 build:
 	swift build -c $(CONFIGURATION)
@@ -23,6 +24,18 @@ run: bundle
 
 open:
 	open -n build/OpenEdit.app --args $(FILE)
+
+# Installs the CLI shim only; the app bundle itself lives wherever it was
+# bundled (the shim looks in /Applications, ~/Applications, and a dev
+# checkout's build/, or accepts an OPENEDIT_APP override). /usr/local/bin
+# usually needs sudo: `sudo make install-cli`, or
+# `make install-cli PREFIX=$$HOME/.local`.
+install-cli:
+	install -d "$(PREFIX)/bin"
+	install -m 0755 Scripts/openedit "$(PREFIX)/bin/openedit"
+
+uninstall-cli:
+	rm -f "$(PREFIX)/bin/openedit"
 
 clean:
 	swift package clean
