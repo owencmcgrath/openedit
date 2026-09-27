@@ -5,6 +5,7 @@ final class DocumentWindowController: NSWindowController {
 
     private let scrollView: NSScrollView
     private let textView: NSTextView
+    private let lineNumberRuler: LineNumberRulerView
 
     init(fileURL: URL?) {
         self.fileURL = fileURL
@@ -45,6 +46,11 @@ final class DocumentWindowController: NSWindowController {
         scrollView.hasHorizontalScroller = false
         scrollView.borderType = .noBorder
         scrollView.autohidesScrollers = true
+
+        lineNumberRuler = LineNumberRulerView(textView: textView, scrollView: scrollView)
+        scrollView.verticalRulerView = lineNumberRuler
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
