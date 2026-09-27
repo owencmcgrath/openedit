@@ -52,6 +52,9 @@ Carthage/Build/
 # macOS
 .DS_Store
 
+# Local app bundle produced by Scripts/build-app.sh
+build/
+
 # fastlane
 #
 # It is recommended to not store the screenshots in the git repo.
