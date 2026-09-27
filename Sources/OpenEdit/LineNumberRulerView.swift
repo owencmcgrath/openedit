@@ -7,6 +7,13 @@ final class LineNumberRulerView: NSRulerView {
     private weak var textView: NSTextView?
     private let horizontalPadding: CGFloat = 6
 
+    /// Character index at which each logical line starts, with a trailing
+    /// entry for the empty line that follows a final newline. Cached so a
+    /// redraw is O(log n) instead of rescanning the whole document from
+    /// index 0 on every caret blink.
+    private var lineStarts: [Int] = [0]
+    private var lineStartsValid = false
+
     init(textView: NSTextView, scrollView: NSScrollView) {
         self.textView = textView
         super.init(scrollView: scrollView, orientation: .verticalRuler)
@@ -49,6 +56,8 @@ final class LineNumberRulerView: NSRulerView {
               let textContainer = textView.textContainer
         else { return }
 
+        ensureLineStarts()
+
         NSColor.textBackgroundColor.setFill()
         bounds.fill()
 
@@ -65,44 +74,44 @@ final class LineNumberRulerView: NSRulerView {
             .font: font,
             .foregroundColor: NSColor.secondaryLabelColor
         ]
+        let digitAdvance = ("0" as NSString).size(withAttributes: attributes).width
 
-        let relativeOrigin = convert(NSPoint.zero, from: textView)
+        let relativeOriginY = convert(NSPoint.zero, from: textView).y + containerOrigin.y
 
-        let firstCharacterIndex = layoutManager.characterIndexForGlyph(at: glyphRange.location)
-        let firstLogicalLineStart = string
-            .lineRange(for: NSRange(location: firstCharacterIndex, length: 0))
-            .location
-        var lineNumber = numberOfLines(before: firstLogicalLineStart, in: string)
-
-        var isFirstFragment = true
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragmentRect, _, _, fragmentGlyphRange, _ in
             let characterIndex = layoutManager.characterIndexForGlyph(at: fragmentGlyphRange.location)
-            let startsLogicalLine = characterIndex == 0 || self.isNewline(at: characterIndex - 1, in: string)
-
-            if startsLogicalLine {
-                self.draw(lineNumber: lineNumber, atFragmentMinY: fragmentRect.minY,
-                          relativeOriginY: relativeOrigin.y + containerOrigin.y,
-                          attributes: attributes)
-                lineNumber += 1
-            } else if isFirstFragment {
-                // Visible top is a wrapped continuation; the next logical line
-                // is one past the line this fragment belongs to.
-                lineNumber += 1
+            guard characterIndex == 0 || Self.isNewline(at: characterIndex - 1, in: string) else {
+                // Wrapped continuation of a previous line: no number.
+                return
             }
-
-            isFirstFragment = false
+            self.draw(
+                lineNumber: self.lineNumber(forCharacterIndex: characterIndex),
+                atFragmentMinY: fragmentRect.minY,
+                relativeOriginY: relativeOriginY,
+                digitAdvance: digitAdvance,
+                attributes: attributes
+            )
         }
 
-        // Empty documents have no line fragments to enumerate but should
-        // still show line 1.
-        if string.length == 0 {
-            draw(lineNumber: 1, atFragmentMinY: 0,
-                 relativeOriginY: relativeOrigin.y + containerOrigin.y,
-                 attributes: attributes)
+        // A final newline creates an empty trailing line that has no glyphs,
+        // so enumerateLineFragments never reports it. Draw it explicitly so a
+        // freshly opened line gets its number before the first keystroke.
+        let extraRect = layoutManager.extraLineFragmentRect
+        if layoutManager.extraLineFragmentTextContainer === textContainer,
+           !extraRect.isEmpty,
+           visibleRect.intersects(extraRect) {
+            draw(
+                lineNumber: lineNumber(forCharacterIndex: string.length),
+                atFragmentMinY: extraRect.minY,
+                relativeOriginY: relativeOriginY,
+                digitAdvance: digitAdvance,
+                attributes: attributes
+            )
         }
     }
 
     @objc private func textDidChange() {
+        lineStartsValid = false
         updateThickness()
         needsDisplay = true
     }
@@ -115,12 +124,13 @@ final class LineNumberRulerView: NSRulerView {
         lineNumber: Int,
         atFragmentMinY fragmentMinY: CGFloat,
         relativeOriginY: CGFloat,
+        digitAdvance: CGFloat,
         attributes: [NSAttributedString.Key: Any]
     ) {
         let label = "\(lineNumber)" as NSString
-        let size = label.size(withAttributes: attributes)
+        let width = digitAdvance * CGFloat(label.length)
         let point = NSPoint(
-            x: ruleThickness - size.width - horizontalPadding,
+            x: ruleThickness - width - horizontalPadding,
             y: relativeOriginY + fragmentMinY
         )
         label.draw(at: point, withAttributes: attributes)
@@ -139,8 +149,8 @@ final class LineNumberRulerView: NSRulerView {
     private func updateThickness() {
         guard let textView, let font = textView.font else { return }
 
-        let lineCount = totalLineCount(in: textView.string as NSString)
-        let digits = max(2, String(lineCount).count)
+        ensureLineStarts()
+        let digits = max(2, String(lineStarts.count).count)
         let sample = String(repeating: "8", count: digits) as NSString
         let width = sample.size(withAttributes: [.font: font]).width
         let newThickness = ceil(width) + horizontalPadding * 2
@@ -150,31 +160,46 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
-    private func numberOfLines(before characterIndex: Int, in string: NSString) -> Int {
-        var lineNumber = 1
-        var location = 0
-        while location < characterIndex {
-            let next = NSMaxRange(string.lineRange(for: NSRange(location: location, length: 0)))
-            if next <= location { break }
-            location = next
-            lineNumber += 1
-        }
-        return lineNumber
+    private func ensureLineStarts() {
+        guard !lineStartsValid, let textView else { return }
+        lineStarts = Self.computeLineStarts(in: textView.string as NSString)
+        lineStartsValid = true
     }
 
-    private func totalLineCount(in string: NSString) -> Int {
-        var count = 1
+    /// Character offsets where each logical line begins. A final newline adds
+    /// an entry at `string.length` for the empty line after it.
+    private static func computeLineStarts(in string: NSString) -> [Int] {
+        var starts = [0]
         var location = 0
         while location < string.length {
             let next = NSMaxRange(string.lineRange(for: NSRange(location: location, length: 0)))
             if next <= location { break }
-            if next < string.length { count += 1 }
             location = next
+            if location < string.length { starts.append(location) }
         }
-        return count
+        if string.length > 0, isNewline(at: string.length - 1, in: string) {
+            starts.append(string.length)
+        }
+        return starts
     }
 
-    private func isNewline(at characterIndex: Int, in string: NSString) -> Bool {
+    /// 1-based line number containing `characterIndex`, via binary search over
+    /// the cached line starts.
+    private func lineNumber(forCharacterIndex characterIndex: Int) -> Int {
+        var low = 0
+        var high = lineStarts.count - 1
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if lineStarts[mid] <= characterIndex {
+                low = mid
+            } else {
+                high = mid - 1
+            }
+        }
+        return low + 1
+    }
+
+    private static func isNewline(at characterIndex: Int, in string: NSString) -> Bool {
         guard characterIndex >= 0, characterIndex < string.length else { return true }
         guard let scalar = UnicodeScalar(string.character(at: characterIndex)) else { return false }
         return CharacterSet.newlines.contains(scalar)
