@@ -20,7 +20,7 @@ final class DocumentWindowController: NSWindowController {
         textContainer.widthTracksTextView = true
         layoutManager.addTextContainer(textContainer)
 
-        textView = NSTextView(frame: .zero, textContainer: textContainer)
+        textView = EditorTextView(frame: .zero, textContainer: textContainer)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(
             width: CGFloat.greatestFiniteMagnitude,
