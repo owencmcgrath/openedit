@@ -55,6 +55,9 @@ Carthage/Build/
 # Local app bundle produced by Scripts/build-app.sh
 build/
 
+# Local scratch file
+/test.txt
+
 # fastlane
 #
 # It is recommended to not store the screenshots in the git repo.
