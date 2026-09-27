@@ -49,9 +49,9 @@ These are the seams between components — pin these down precisely since they l
 
 ### 5.1 CLI shim → App
 
-- **[Default]** Fire-and-forget: `openedit file.py` resolves to an absolute path and calls `open -na OpenEdit.app --args <path>`, then exits immediately. No blocking `$EDITOR`-style wait mode in v1.
+- **[Default]** Fire-and-forget: `openedit file.py` resolves to an absolute path and calls `open -a OpenEdit.app <path>`, then exits immediately. No blocking `$EDITOR`-style wait mode in v1. (Empirically verified: `-n` forces a second app instance and breaks reuse, and `--args` are ignored when an instance is already running — so files must be passed as open-document arguments, delivered to the running instance as Apple Events.)
 - **[Default, deferred]** A blocking `$EDITOR`-compatible mode is not being built for v1. Context: some CLI tools (`git commit`, `crontab -e`) launch whatever `$EDITOR` points to and *wait* for it to exit before continuing — e.g. `EDITOR="openedit --wait" git commit` would need `openedit` to hang until you close the window, then let `git` read the finished commit message. That requires real IPC (the CLI process blocking on a signal from the app when the window closes), which is more plumbing than the CLI shim in 5.1 currently has. Since the core use case here is reviewing/editing files alongside an agent — not standing in for `$EDITOR` in other tools — this is deferred (see Section 9), but the app-side entry point shouldn't be built in a way that makes adding it later awkward.
-- App-side entry point: `NSApplicationDelegate.application(_:open:)`. `open -na` naturally reuses an already-running instance; if the file is already open, the existing window is brought forward rather than duplicated (standard `NSDocumentController` behavior).
+- App-side entry point: `NSApplicationDelegate.application(_:open:)`. `open -a` (no `-n`) reuses an already-running instance; if the file is already open, the existing window is brought forward rather than duplicated (standard `NSDocumentController` behavior).
 - Optional `file.py:LINE:COL` suffix syntax for jump-to-position — **[Default]**, low priority, not required for v1.
 
 ### 5.2 Config file
