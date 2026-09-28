@@ -10,7 +10,6 @@ final class FileChangeWatcher {
     private let onChange: () -> Void
 
     private var source: DispatchSourceFileSystemObject?
-    private var fileDescriptor: Int32 = -1
 
     init(path: String, onChange: @escaping () -> Void) {
         self.path = path
@@ -28,7 +27,6 @@ final class FileChangeWatcher {
         stop()
         let fd = open(path, O_EVTONLY)
         guard fd >= 0 else { return }
-        fileDescriptor = fd
 
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,

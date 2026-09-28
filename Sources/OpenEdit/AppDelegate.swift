@@ -1,8 +1,47 @@
 import AppKit
 
+/// NSDocumentController subclass carrying the launch-settle behavior: Untitled
+/// documents created by the launch machinery (AppKit's untitled-at-launch
+/// pass and the bare-executable fallbacks all route through
+/// `openUntitledDocumentAndDisplay`) are flagged on TextDocument, and the
+/// first real-file open afterwards drops the empty ones — deterministically,
+/// whenever the file arrives, instead of on a fixed timer.
+final class OpenEditDocumentController: NSDocumentController {
+    override func openUntitledDocumentAndDisplay(_ display: Bool) throws -> NSDocument {
+        let document = try super.openUntitledDocumentAndDisplay(display)
+        if let textDocument = document as? TextDocument, textDocument.fileURL == nil {
+            textDocument.wasLaunchedUntitled = true
+        }
+        return document
+    }
+
+    override func openDocument(
+        withContentsOf url: URL,
+        display displayDocument: Bool,
+        completionHandler completionHandlerForDocuments: @escaping (NSDocument?, Bool, Error?) -> Void
+    ) {
+        super.openDocument(
+            withContentsOf: url,
+            display: displayDocument
+        ) { document, documentWasAlreadyOpen, error in
+            if document != nil {
+                TextDocument.settleLaunchedUntitledDocuments()
+            }
+            completionHandlerForDocuments(document, documentWasAlreadyOpen, error)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hasFinishedLaunching = false
     private var pendingOpenURLs: [URL] = []
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // The first NSDocumentController instance created becomes the shared
+        // one; create ours before AppKit's finishLaunching machinery touches
+        // `NSDocumentController.shared`.
+        _ = OpenEditDocumentController()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
@@ -26,16 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // AppKit's untitled-at-launch pass runs before a cold-launch Open
-        // Documents Apple Event is processed (and consults no delegate hook),
-        // so `open -a OpenEdit.app somefile` gets an Untitled window the user
-        // didn't ask for. Once the events have landed, drop any launch-created
-        // untitled document that sits alongside real ones; keep it when the
-        // launch really had no files.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.settleLaunchDocuments()
-        }
-
+        // Stray-untitled cleanup after launch needs no timer: file documents
+        // arriving later (Open Documents Apple Events, slow mounts) settle the
+        // launch-created Untitled themselves via
+        // TextDocument.settleLaunchedUntitledDocuments().
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -47,17 +80,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !hasDocumentTypes, NSDocumentController.shared.documents.isEmpty {
             openFile(at: nil)
         }
-    }
-
-    /// Close a launch-created Untitled document if the same launch also
-    /// delivered file documents (AppKit's untitled pass ordered them first);
-    /// an empty untitled TextDocument is unedited, so closing prompts nothing.
-    private func settleLaunchDocuments() {
-        let documents = NSDocumentController.shared.documents
-        guard documents.count > 1,
-              let untitled = documents.first(where: { ($0 as? TextDocument)?.fileURL == nil }) as? TextDocument
-        else { return }
-        untitled.close()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -122,6 +144,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             newDocument.makeWindowControllers()
             newDocument.showWindows()
             newDocument.windowControllers.forEach { $0.window?.makeKeyAndOrderFront(nil) }
+            if canonicalURL == nil {
+                // Same launch-settle flagging the bundled
+                // OpenEditDocumentController applies to the Untitled fallback.
+                newDocument.wasLaunchedUntitled = true
+            } else {
+                // A newly arrived file document settles any launch-created
+                // empty Untitled documents.
+                TextDocument.settleLaunchedUntitledDocuments()
+            }
         } catch {
             NSDocumentController.shared.presentError(error)
         }
@@ -129,19 +160,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hasDocumentTypes: Bool {
         Bundle.main.infoDictionary?["CFBundleDocumentTypes"] != nil
-    }
-
-    @objc private func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              let controller = window.windowController as? DocumentWindowController,
-              let textDocument = controller.textDocument
-        else { return }
-        // NSDocument normally closes itself once its last window goes away;
-        // this async check is a no-op then, and a backstop otherwise.
-        DispatchQueue.main.async { [weak textDocument] in
-            guard let textDocument, textDocument.windowControllers.isEmpty else { return }
-            NSDocumentController.shared.removeDocument(textDocument)
-        }
     }
 
     /// File paths supplied as launch arguments (e.g. `swift run OpenEdit <path>`

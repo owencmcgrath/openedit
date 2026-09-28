@@ -33,6 +33,15 @@ final class TextDocument: NSDocument {
 
     private(set) var text: String = ""
 
+    /// True for Untitled documents created by the launch machinery (AppKit's
+    /// untitled-at-launch pass and the bare-executable fallbacks all route
+    /// through `openUntitledDocumentAndDisplay`, which flags the result in
+    /// OpenEditDocumentController). Such a document is a launch artifact, so
+    /// when the launch also delivers real file documents the empty ones are
+    /// dropped (see settleLaunchedUntitledDocuments) — without any timing
+    /// guess about when Apple Events land.
+    var wasLaunchedUntitled = false
+
     private var watcher: FileChangeWatcher?
     private var lastKnownFileStat: FileStat?
 
@@ -112,24 +121,31 @@ final class TextDocument: NSDocument {
         // watcher via refreshWatchState().
         guard currentStat != lastKnownFileStat else { return }
 
-        // Tell NSDocument we've seen this state of the file. Otherwise its own
-        // save-time conflict check ("file changed by another application —
-        // save anyway?") re-prompts on the next Cmd-S for a change this
-        // watcher already surfaced to the user.
-        fileModificationDate = currentStat.modificationDate
-
         if isDocumentEdited {
+            // Record the file's state only once the prompt is actually
+            // scheduled. When the prompt is suppressed (a sheet is already
+            // up), the stats stay stale, so the event for the suppressed
+            // write is "unseen" and the next post-sheet event re-prompts.
+            // The same staleness keeps NSDocument's own save-time conflict
+            // check armed for a change the user was never asked about.
+            guard promptReloadFromDisk() else { return }
             lastKnownFileStat = currentStat
-            promptReloadFromDisk()
+            fileModificationDate = currentStat.modificationDate
         } else {
+            // Clean reload: refreshWatchState() inside reloadFromDisk()
+            // re-snapshots both stats for us.
             try? reloadFromDisk()
         }
     }
 
-    private func promptReloadFromDisk() {
+    /// Present the Keep Mine / Reload prompt; returns whether a prompt was
+    /// actually scheduled (no window, or a sheet is already attached — a
+    /// second external write landing while the prompt is up).
+    @discardableResult
+    private func promptReloadFromDisk() -> Bool {
         guard let window = windowControllers.lazy.compactMap(\.window).first,
               window.attachedSheet == nil
-        else { return }
+        else { return false }
 
         let alert = NSAlert()
         alert.messageText = "File changed on disk"
@@ -141,19 +157,24 @@ final class TextDocument: NSDocument {
         alert.addButton(withTitle: "Keep Mine")
         alert.addButton(withTitle: "Reload from Disk")
 
+        var didHandleResponse = false
         alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self else { return }
+            guard let self, !didHandleResponse else { return }
+            didHandleResponse = true
             // Normally AppKit ends the sheet itself; an accessibility-driven
             // button click (how agents drive this app) can complete the modal
             // session without detaching the sheet window, which would block
             // every later prompt and keystroke routed to the window. Ending it
-            // again is a no-op when already detached.
+            // again is a no-op when already detached — but AppKit may deliver
+            // this completion a second time for that explicit end, so reload
+            // exactly once via the guard above.
             if let sheet = window.attachedSheet {
                 window.endSheet(sheet, returnCode: response)
             }
             guard response == .alertSecondButtonReturn else { return }
             try? self.reloadFromDisk()
         }
+        return true
     }
 
     private func reloadFromDisk() throws {
@@ -188,6 +209,24 @@ final class TextDocument: NSDocument {
     }
 
     // MARK: - Decoding
+
+    /// Drop launch-created empty Untitled documents once real file documents
+    /// have arrived (the launch artifact vs. user content distinction is the
+    /// `wasLaunchedUntitled` flag; edited and non-empty untitled documents are
+    /// always kept). Deterministic replacement for the old launch-settle
+    /// timer: it runs when a real file document actually opens, however late
+    /// that happens.
+    static func settleLaunchedUntitledDocuments() {
+        for document in NSDocumentController.shared.documents {
+            guard let textDocument = document as? TextDocument,
+                  textDocument.wasLaunchedUntitled,
+                  textDocument.fileURL == nil,
+                  !textDocument.isDocumentEdited
+            else { continue }
+            textDocument.wasLaunchedUntitled = false
+            textDocument.close()
+        }
+    }
 
     private static func decode(_ data: Data) -> String? {
         String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
