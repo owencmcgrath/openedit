@@ -35,6 +35,8 @@
 			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>OpenEdit.TextDocument</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.text</string>

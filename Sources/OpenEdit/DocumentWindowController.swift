@@ -1,15 +1,23 @@
 import AppKit
 
-final class DocumentWindowController: NSWindowController {
-    let fileURL: URL?
-
+/// Window for one open document: the text view, scroll view, and gutter, with
+/// user edits forwarded to the TextDocument for standard NSDocument dirty
+/// tracking (ARCHITECTURE.md 5.11) and reloads pushed back in from the
+/// document's watcher (5.3).
+final class DocumentWindowController: NSWindowController, NSTextViewDelegate {
     private let scrollView: NSScrollView
     private let textView: NSTextView
     private let lineNumberRuler: LineNumberRulerView
 
-    init(fileURL: URL?) {
-        self.fileURL = fileURL
+    /// Guard so programmatic text application (initial load, silent reload,
+    /// reload from the conflict prompt) is not counted as a user edit.
+    private var isApplyingDocumentText = false
 
+    var textDocument: TextDocument? {
+        document as? TextDocument
+    }
+
+    init(document: TextDocument) {
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         textStorage.addLayoutManager(layoutManager)
@@ -20,34 +28,35 @@ final class DocumentWindowController: NSWindowController {
         textContainer.widthTracksTextView = true
         layoutManager.addTextContainer(textContainer)
 
-        textView = EditorTextView(frame: .zero, textContainer: textContainer)
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(
+        let editorTextView = EditorTextView(frame: .zero, textContainer: textContainer)
+        textView = editorTextView
+        editorTextView.minSize = NSSize(width: 0, height: 0)
+        editorTextView.maxSize = NSSize(
             width: CGFloat.greatestFiniteMagnitude,
             height: CGFloat.greatestFiniteMagnitude
         )
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainerInset = NSSize(width: 4, height: 4)
-        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.allowsUndo = true
-        textView.isRichText = false
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isAutomaticTextReplacementEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.usesFindBar = true
-        textView.isIncrementalSearchingEnabled = true
+        editorTextView.isVerticallyResizable = true
+        editorTextView.isHorizontallyResizable = false
+        editorTextView.autoresizingMask = [.width]
+        editorTextView.textContainerInset = NSSize(width: 4, height: 4)
+        editorTextView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        editorTextView.allowsUndo = true
+        editorTextView.isRichText = false
+        editorTextView.isAutomaticQuoteSubstitutionEnabled = false
+        editorTextView.isAutomaticDashSubstitutionEnabled = false
+        editorTextView.isAutomaticTextReplacementEnabled = false
+        editorTextView.isAutomaticSpellingCorrectionEnabled = false
+        editorTextView.usesFindBar = true
+        editorTextView.isIncrementalSearchingEnabled = true
 
         scrollView = NSScrollView(frame: .zero)
-        scrollView.documentView = textView
+        scrollView.documentView = editorTextView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.borderType = .noBorder
         scrollView.autohidesScrollers = true
 
-        lineNumberRuler = LineNumberRulerView(textView: textView, scrollView: scrollView)
+        lineNumberRuler = LineNumberRulerView(textView: editorTextView, scrollView: scrollView)
         scrollView.verticalRulerView = lineNumberRuler
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -61,11 +70,13 @@ final class DocumentWindowController: NSWindowController {
         window.contentView = scrollView
         window.center()
         window.setFrameAutosaveName("OpenEditDocumentWindow")
-        window.title = fileURL?.lastPathComponent ?? "Untitled"
+        window.title = document.displayName
 
         super.init(window: window)
 
-        loadContents()
+        editorTextView.string = document.text
+        editorTextView.undoManager?.removeAllActions()
+        editorTextView.delegate = self
     }
 
     @available(*, unavailable)
@@ -78,15 +89,19 @@ final class DocumentWindowController: NSWindowController {
         window?.makeFirstResponder(textView)
     }
 
-    private func loadContents() {
-        guard let fileURL else { return }
+    /// Push disk-derived text into the view, clearing undo history that would
+    /// otherwise try to undo edits into a document that no longer contains
+    /// them. (The initializer reads document.text directly; this covers
+    /// watcher-driven reloads.)
+    func applyText(_ newText: String) {
+        isApplyingDocumentText = true
+        defer { isApplyingDocumentText = false }
+        textView.string = newText
+        textView.undoManager?.removeAllActions()
+    }
 
-        let contents = (try? String(contentsOf: fileURL, encoding: .utf8))
-            ?? (try? String(contentsOf: fileURL, encoding: .isoLatin1))
-
-        if let contents {
-            textView.string = contents
-            textView.undoManager?.removeAllActions()
-        }
+    func textDidChange(_ notification: Notification) {
+        guard !isApplyingDocumentText, let textDocument else { return }
+        textDocument.noteTextEdited(textView.string)
     }
 }
