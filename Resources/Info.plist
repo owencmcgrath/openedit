@@ -35,11 +35,14 @@
 			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>OpenEdit.TextDocument</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.text</string>
 				<string>public.source-code</string>
 				<string>public.plain-text</string>
+				<string>public.data</string>
 			</array>
 		</dict>
 	</array>
