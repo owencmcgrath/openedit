@@ -34,7 +34,27 @@ let package = Package(
         // TOML parsing for the language registry (ARCHITECTURE.md 5.2). Foundation
         // has no TOML reader; this is the only third-party dependency the config
         // loader adds, and it is confined to the OpenEditConfig module.
-        .package(url: "https://github.com/LebJe/TOMLKit.git", .exact("0.6.0"))
+        // 0.x releases may break API between minors, so pin exactly; bump
+        // deliberately rather than letting a fresh resolve pick up 0.7.0.
+        .package(url: "https://github.com/LebJe/TOMLKit.git", .exact("0.6.0")),
+
+        // Tree-sitter syntax highlighting (ARCHITECTURE.md 5.4, 5.8). SwiftTreeSitter
+        // is the binding the architecture doc names; the C runtime arrives
+        // transitively through it. AGENTS/GRAMMARS.md records the source, license,
+        // and pinned version of each grammar and how its query bundle reaches
+        // OpenEdit.app.
+        .package(url: "https://github.com/tree-sitter/swift-tree-sitter", from: "0.25.0"),
+
+        // Grammar parsers, one per bundled language. Each is pinned with `exact:`
+        // to the newest release whose Package.swift statically lists the external
+        // scanner: newer tags detect it with `FileManager.default.fileExists`,
+        // which returns false when the manifest is evaluated as a dependency,
+        // silently dropping the scanner and failing to link. See GRAMMARS.md.
+        .package(url: "https://github.com/tree-sitter/tree-sitter-python", exact: "0.23.6"),
+        .package(url: "https://github.com/tree-sitter/tree-sitter-json", exact: "0.24.8"),
+        .package(url: "https://github.com/tree-sitter-grammars/tree-sitter-markdown", exact: "0.5.3"),
+        .package(url: "https://github.com/tree-sitter-grammars/tree-sitter-toml", exact: "0.7.0"),
+        .package(url: "https://github.com/tree-sitter-grammars/tree-sitter-yaml", exact: "0.7.0")
     ],
     targets: [
         // Config loader (ARCHITECTURE.md 5.2). Split out from the app so its
@@ -47,9 +67,25 @@ let package = Package(
             ],
             path: "Sources/OpenEditConfig"
         ),
+        // Tree-sitter highlighting (ARCHITECTURE.md 5.4, 5.8). Split out from the
+        // AppKit shell so tokenization and the capture → dynamic-color mapping are
+        // testable without a window. It takes a grammar *name* from the config
+        // registry and knows nothing about the config loader itself.
+        .target(
+            name: "OpenEditHighlighting",
+            dependencies: [
+                .product(name: "SwiftTreeSitter", package: "swift-tree-sitter"),
+                .product(name: "TreeSitterPython", package: "tree-sitter-python"),
+                .product(name: "TreeSitterJSON", package: "tree-sitter-json"),
+                .product(name: "TreeSitterMarkdown", package: "tree-sitter-markdown"),
+                .product(name: "TreeSitterTOML", package: "tree-sitter-toml"),
+                .product(name: "TreeSitterYAML", package: "tree-sitter-yaml")
+            ],
+            path: "Sources/OpenEditHighlighting"
+        ),
         .executableTarget(
             name: "OpenEdit",
-            dependencies: ["OpenEditConfig"],
+            dependencies: ["OpenEditConfig", "OpenEditHighlighting"],
             path: "Sources/OpenEdit",
             linkerSettings: [
                 .unsafeFlags([
@@ -66,6 +102,11 @@ let package = Package(
             path: "Tests/OpenEditConfigTests",
             // Fixtures are read from the source tree via #filePath, not bundled.
             exclude: ["Fixtures"]
+        ),
+        .testTarget(
+            name: "OpenEditHighlightingTests",
+            dependencies: ["OpenEditHighlighting"],
+            path: "Tests/OpenEditHighlightingTests"
         )
     ]
 )

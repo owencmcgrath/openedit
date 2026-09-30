@@ -15,6 +15,15 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN_PATH/OpenEdit" "$APP_DIR/Contents/MacOS/OpenEdit"
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 
+# SwiftPM emits a resource bundle per tree-sitter grammar target next to the
+# executable; they hold the highlight queries (AGENTS/GRAMMARS.md). The
+# highlighter resolves them from Bundle.main.resourceURL, so they belong in
+# Contents/Resources.
+for grammar_bundle in "$BIN_PATH"/*.bundle; do
+    [ -e "$grammar_bundle" ] || continue
+    cp -R "$grammar_bundle" "$APP_DIR/Contents/Resources/"
+done
+
 # Ad-hoc signature so the bundle launches cleanly via `open` during development.
 codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
 
