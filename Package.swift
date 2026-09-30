@@ -30,9 +30,26 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
+    dependencies: [
+        // TOML parsing for the language registry (ARCHITECTURE.md 5.2). Foundation
+        // has no TOML reader; this is the only third-party dependency the config
+        // loader adds, and it is confined to the OpenEditConfig module.
+        .package(url: "https://github.com/LebJe/TOMLKit.git", .exact("0.6.0"))
+    ],
     targets: [
+        // Config loader (ARCHITECTURE.md 5.2). Split out from the app so its
+        // behavior is testable and so #5/#7 can depend on the registry without
+        // importing the AppKit shell.
+        .target(
+            name: "OpenEditConfig",
+            dependencies: [
+                .product(name: "TOMLKit", package: "TOMLKit")
+            ],
+            path: "Sources/OpenEditConfig"
+        ),
         .executableTarget(
             name: "OpenEdit",
+            dependencies: ["OpenEditConfig"],
             path: "Sources/OpenEdit",
             linkerSettings: [
                 .unsafeFlags([
@@ -42,6 +59,13 @@ let package = Package(
                     "-Xlinker", sdkVersion
                 ])
             ]
+        ),
+        .testTarget(
+            name: "OpenEditConfigTests",
+            dependencies: ["OpenEditConfig"],
+            path: "Tests/OpenEditConfigTests",
+            // Fixtures are read from the source tree via #filePath, not bundled.
+            exclude: ["Fixtures"]
         )
     ]
 )

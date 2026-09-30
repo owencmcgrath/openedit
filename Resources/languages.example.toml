@@ -1,0 +1,42 @@
+# OpenEdit language registry — example
+#
+# Copy to ~/.config/openedit/languages.toml and edit. Every field is optional
+# except `extensions`, `languageId`, and `grammar`.
+#
+# This file is an overlay, not a replacement: entries here override or extend
+# the defaults bundled with the app. Omitting the file entirely just uses the
+# bundled defaults. See ARCHITECTURE.md 5.2.
+
+# ── Override a bundled language ──────────────────────────────────────────────
+# An entry whose `languageId` matches a bundled one replaces that entry whole,
+# so restate every field you want to keep.
+[[language]]
+extensions = ["py", "pyw", "pyi"]
+languageId = "python"
+grammar = "python"
+binaryName = "pylsp"
+installCommand = "pip install python-lsp-server"
+
+# ── Add a language the app does not bundle ───────────────────────────────────
+[[language]]
+extensions = ["rs"]
+languageId = "rust"
+grammar = "rust"
+binaryName = "rust-analyzer"
+installCommand = "rustup component add rust-analyzer"
+
+# ── Highlighting-only: omit `binaryName` (no LSP) ────────────────────────────
+[[language]]
+extensions = ["ini", "cfg"]
+languageId = "ini"
+grammar = "ini"
+
+# ── Literal server path for a non-standard install ───────────────────────────
+# `lspPath` overrides the PATH lookup and requires `binaryName`.
+[[language]]
+extensions = ["lua"]
+languageId = "lua"
+grammar = "lua"
+binaryName = "lua-language-server"
+installCommand = "brew install lua-language-server"
+lspPath = "/opt/homebrew/bin/lua-language-server"
