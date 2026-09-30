@@ -1,0 +1,16 @@
+# Test fixture: overrides the bundled `python` entry wholesale and extends the
+# registry with a language the app does not bundle.
+
+[[language]]
+extensions = [".py", "pyi"]
+languageId = "python"
+grammar = "python"
+binaryName = "pyright-langserver"
+installCommand = "npm install -g pyright"
+
+[[language]]
+extensions = ["rs"]
+languageId = "rust"
+grammar = "rust"
+binaryName = "rust-analyzer"
+installCommand = "rustup component add rust-analyzer"

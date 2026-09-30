@@ -57,8 +57,25 @@ These are the seams between components — pin these down precisely since they l
 ### 5.2 Config file
 
 - **[Decided]** Location: `~/.config/openedit/languages.toml` — TOML, for hand-editability.
-- Schema (conceptually): a list of entries, each with `extensions: [String]`, `languageId: String`, `grammar: String` (tree-sitter grammar name), `binaryName: String` (checked against `PATH` to detect presence), `installCommand: String` (shown in the missing-LSP notification, 5.6), and optionally a literal `lspPath` override for non-standard install locations. No `binaryName`/`lspCommand` at all means highlighting-only, no LSP for that language.
+- Schema (conceptually): a list of `[[language]]` entries, each with `extensions: [String]`, `languageId: String`, `grammar: String` (tree-sitter grammar name), optional `binaryName: String` (checked against `PATH` to detect presence), optional `installCommand: String` (shown in the missing-LSP notification, 5.6), and optional literal `lspPath` override for non-standard install locations. No `binaryName` means highlighting-only, no LSP for that language; `installCommand` is optional even when `binaryName` is present, and both `installCommand` and `lspPath` require `binaryName` (they are LSP-only fields).
 - Bundled defaults ship inside the app for common languages, each with a working `binaryName`/`installCommand` pair; the user file overrides/extends rather than fully replacing them.
+- **TOML parsing** uses `TOMLKit` (LebJe) — the only third-party dependency, confined to the `OpenEditConfig` module. Foundation has no TOML reader, and the loader walks the parsed tree itself so schema decisions are not inherited from the library. **[Decided]**
+- **[Decided] Overlay semantics** (implemented in `LanguageConfigLoader`, tests in `Tests/OpenEditConfigTests`):
+  - Loading the user file is optional; a missing file simply yields the bundled defaults.
+  - A user entry with an existing `languageId` replaces that bundled entry **whole** (no field-by-field merge); a new `languageId` appends.
+  - Duplicate extensions: the **later** entry wins (the user file is processed after the bundled defaults), and there is no removal syntax in v1.
+  - An invalid entry (wrong type, unknown field, missing required field) is **skipped and reported** with a diagnostic carrying the config path, entry index, language ID, and field; its neighbors and all defaults are untouched. Malformed TOML keeps the defaults and returns a diagnostic. The loader never throws or crashes.
+  - Extensions are normalized (trimmed, lowercased, leading dot stripped) before lookup and duplicate detection.
+- **Bundled language inventory.** Grammar/`binaryName` values are names, not verified-working claims — nothing in v1 exercises them yet (#5 highlighting, #7 PATH detection). Do not upgrade a row to "verified" until a test or manual check proves it.
+
+  | Language ID | Extensions | Grammar | Binary | Install command | Status |
+  |---|---|---|---|---|---|
+  | `python` | `py`, `pyw` | `python` | `pylsp` | `pip install python-lsp-server` | names unverified |
+  | `json` | `json` | `json` | — | — | highlighting-only |
+  | `markdown` | `md`, `markdown` | `markdown` | — | — | highlighting-only |
+  | `toml` | `toml` | `toml` | — | — | highlighting-only |
+  | `yaml` | `yaml`, `yml` | `yaml` | — | — | highlighting-only |
+
 
 ### 5.3 File watcher → Document
 
