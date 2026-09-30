@@ -62,7 +62,7 @@ These are the seams between components — pin these down precisely since they l
 - **TOML parsing** uses `TOMLKit` (LebJe) — the only third-party dependency, confined to the `OpenEditConfig` module. Foundation has no TOML reader, and the loader walks the parsed tree itself so schema decisions are not inherited from the library. **[Decided]**
 - **[Decided] Overlay semantics** (implemented in `LanguageConfigLoader`, tests in `Tests/OpenEditConfigTests`):
   - Loading the user file is optional; a missing file simply yields the bundled defaults.
-  - A user entry with an existing `languageId` replaces that bundled entry **whole** (no field-by-field merge); a new `languageId` appends.
+  - A user entry with an existing `languageId` replaces that bundled entry **whole** (no field-by-field merge); a new `languageId` appends. Two user entries with the same `languageId`: the **later** one wins and the collision is reported with a diagnostic (same later-wins rule as duplicate extensions).
   - Duplicate extensions: the **later** entry wins (the user file is processed after the bundled defaults), and there is no removal syntax in v1.
   - An invalid entry (wrong type, unknown field, missing required field) is **skipped and reported** with a diagnostic carrying the config path, entry index, language ID, and field; its neighbors and all defaults are untouched. Malformed TOML keeps the defaults and returns a diagnostic. The loader never throws or crashes.
   - Extensions are normalized (trimmed, lowercased, leading dot stripped) before lookup and duplicate detection.

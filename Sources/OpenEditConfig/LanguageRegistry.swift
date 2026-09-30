@@ -2,7 +2,7 @@
 /// list plus extension- and ID-keyed indexes for #5/#7. The order of `languages`
 /// is meaningful for duplicate extensions — when two entries claim the same
 /// extension the later one wins (see `LanguageConfigLoader`).
-public struct LanguageRegistry: Sendable {
+public struct LanguageRegistry: Equatable, Sendable {
     public let languages: [ResolvedLanguage]
 
     private let languagesByExtension: [String: ResolvedLanguage]

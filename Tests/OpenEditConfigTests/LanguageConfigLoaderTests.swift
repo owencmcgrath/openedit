@@ -123,6 +123,33 @@ import Testing
         #expect(result.registry.language(forLanguageID: "markdown") != nil)
     }
 
+    @Test func duplicateLanguageIDLaterEntryWinsAndIsReported() {
+        let result = loadInline(
+            """
+            [[language]]
+            extensions = ["aa"]
+            languageId = "dup-id"
+            grammar = "first-grammar"
+
+            [[language]]
+            extensions = ["bb"]
+            languageId = "dup-id"
+            grammar = "second-grammar"
+            """
+        )
+
+        // Later entry wins, consistent with duplicate extensions.
+        let language = result.registry.language(forLanguageID: "dup-id")
+        #expect(language?.grammar == "second-grammar")
+        #expect(language?.extensions == ["bb"])
+
+        // ...and the collision is reported, pointing at the later entry.
+        #expect(result.diagnostics.count == 1)
+        #expect(result.diagnostics.first?.entryIndex == 1)
+        #expect(result.diagnostics.first?.languageID == "dup-id")
+        #expect(result.diagnostics.first?.field == "languageId")
+    }
+
     // MARK: - Validation / malformed input
 
     @Test func unknownFieldSkipsOnlyThatEntry() {
@@ -210,6 +237,15 @@ import Testing
         #expect(!result.diagnostics.isEmpty)
         #expect(result.diagnostics.first?.field == "language")
         #expect(result.registry.languages == BundledLanguages.all)
+    }
+
+    @Test func descriptionFormatsFileLevelFieldsWithoutPathDot() {
+        let result = loadInline("language = 3")
+
+        #expect(
+            result.diagnostics.first?.description
+                == "/tmp/languages.toml: field 'language': expected an array of tables (`[[language]]`)"
+        )
     }
 
     @Test func unreadableConfigSurfacesDiagnosticWithoutCrashing() {

@@ -34,7 +34,7 @@ let package = Package(
         // TOML parsing for the language registry (ARCHITECTURE.md 5.2). Foundation
         // has no TOML reader; this is the only third-party dependency the config
         // loader adds, and it is confined to the OpenEditConfig module.
-        .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0")
+        .package(url: "https://github.com/LebJe/TOMLKit.git", .exact("0.6.0"))
     ],
     targets: [
         // Config loader (ARCHITECTURE.md 5.2). Split out from the app so its

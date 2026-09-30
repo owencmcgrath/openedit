@@ -25,7 +25,8 @@ import TOMLKit
 /// - No `binaryName` means highlighting-only; `installCommand` is optional even
 ///   when `binaryName` is present.
 /// - A user entry replaces the whole bundled entry with the same `languageId`;
-///   a new `languageId` extends the list.
+///   a new `languageId` extends the list. Two user entries with the same
+///   `languageId`: the later one wins and the collision is reported.
 /// - Duplicate extensions: the later entry wins (user file is processed after
 ///   the bundled defaults), and there is no removal syntax in v1.
 /// - An invalid entry is skipped and reported; its neighbors and the defaults
@@ -114,6 +115,7 @@ public enum LanguageConfigLoader {
 
         var diagnostics: [LanguageConfigDiagnostic] = []
         var userLanguages: [ResolvedLanguage] = []
+        var seenUserIDs: [String: Int] = [:]
 
         for (index, element) in entries.enumerated() {
             guard element.type == .table, let table = element.table else {
@@ -130,6 +132,21 @@ public enum LanguageConfigLoader {
             let parsed = parseEntry(table, entryIndex: index, configPath: configPath)
             diagnostics.append(contentsOf: parsed.diagnostics)
             if let language = parsed.language {
+                if let previousIndex = seenUserIDs[language.languageID] {
+                    // Two user entries with the same `languageId` are almost
+                    // certainly a typo; the later one still wins (same rule as
+                    // duplicate extensions), but the collision is reported.
+                    diagnostics.append(
+                        LanguageConfigDiagnostic(
+                            configPath: configPath,
+                            entryIndex: index,
+                            languageID: language.languageID,
+                            field: "languageId",
+                            message: "duplicate `languageId`; this entry replaces the one at index \(previousIndex)"
+                        )
+                    )
+                }
+                seenUserIDs[language.languageID] = index
                 userLanguages.append(language)
             }
         }

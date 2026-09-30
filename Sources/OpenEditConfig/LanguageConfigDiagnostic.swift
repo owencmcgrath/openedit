@@ -34,8 +34,10 @@ public struct LanguageConfigDiagnostic: Equatable, Sendable {
         self.message = message
     }
 
-    /// Human-readable one-liner, e.g.
-    /// `~/.config/openedit/languages.toml: [[language]][2] (python).binaryName: expected a string`.
+    /// Human-readable one-liner. Entry-scoped problems read as
+    /// `~/.config/openedit/languages.toml: [[language]][2] (python).binaryName: expected a string`;
+    /// file-level problems read as
+    /// `~/.config/openedit/languages.toml: field 'language': expected an array of tables`.
     public var description: String {
         var location = configPath
         if let entryIndex {
@@ -45,7 +47,9 @@ public struct LanguageConfigDiagnostic: Equatable, Sendable {
             location += " (\(languageID))"
         }
         if let field {
-            location += ".\(field)"
+            // Without an entry the field name would otherwise read as a path
+            // component of the config file (`…/languages.toml.language`).
+            location += entryIndex == nil ? ": field '\(field)'" : ".\(field)"
         }
         return "\(location): \(message)"
     }
@@ -54,7 +58,7 @@ public struct LanguageConfigDiagnostic: Equatable, Sendable {
 /// The output of loading the config (ARCHITECTURE.md 5.2): the merged registry
 /// plus any diagnostics. A loader never throws out of a bad config — the app
 /// keeps the bundled defaults and surfaces the diagnostics instead.
-public struct LanguageConfigLoadResult {
+public struct LanguageConfigLoadResult: Equatable, Sendable {
     public let registry: LanguageRegistry
     public let diagnostics: [LanguageConfigDiagnostic]
 
