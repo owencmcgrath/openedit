@@ -13,6 +13,12 @@ the key looked up in `GrammarRegistry`.
 | TOML | `TreeSitterTOML` | https://github.com/tree-sitter-grammars/tree-sitter-toml | `0.7.0` | MIT |
 | YAML | `TreeSitterYAML` | https://github.com/tree-sitter-grammars/tree-sitter-yaml | `0.7.0` | MIT |
 
+Markdown is the block grammar only: `markdown_inline` (which parses the
+contents of inline spans) is not bundled, so text inside headings, paragraphs,
+and emphasis keeps the dynamic default label color. Add
+`tree-sitter-grammars/tree-sitter-markdown-inline` with its own query bundle if
+inline highlighting is wanted.
+
 The Swift binding is [`tree-sitter/swift-tree-sitter`](https://github.com/tree-sitter/swift-tree-sitter)
 (`SwiftTreeSitter`, pinned `from: 0.25.0`, BSD-3-Clause); it brings in the
 tree-sitter C runtime (`tree-sitter/tree-sitter`, MIT) transitively. Grammars
@@ -37,7 +43,7 @@ deliberately and re-verify the build, not with a floating range.
 SwiftPM emits one resource bundle per grammar target
 (`TreeSitterPython_TreeSitterPython.bundle`, …, containing
 `Contents/Resources/queries/*.scm`) next to the executable under `swift run`
-and `swift test`. `Scripts/build-app.sh` copies every `*.bundle` into
+and `swift test`. `Scripts/build-app.sh` copies every `TreeSitter*.bundle` into
 `OpenEdit.app/Contents/Resources`. `GrammarRegistry.defaultQueriesDirectory`
 walks the executable's, `Bundle.main`'s, and `Bundle(for:)`'s ancestors so the
 same lookup succeeds in all three launch paths, then hands the directory to

@@ -12,6 +12,11 @@ import SwiftTreeSitter
 ///
 /// A missing language mapping or unbundled grammar leaves the highlighter
 /// inactive: the text stays plain and editable, and `diagnostic` explains why.
+///
+/// Main-actor isolated: every operation writes an `NSTextStorage`, which AppKit
+/// requires on the main thread (5.11's one-window-per-document means the window
+/// controller always calls from there).
+@MainActor
 public final class TreeSitterHighlighter {
     public private(set) var diagnostic: HighlightingDiagnostic?
 
@@ -33,10 +38,14 @@ public final class TreeSitterHighlighter {
 
     /// Resolve `grammarName` through the bundled grammars. A `nil` name (no
     /// config entry for the file) is diagnosed rather than highlighted.
+    ///
+    /// The `registry` default is the app's single shared instance
+    /// (`GrammarRegistry.shared`): query directories resolve and highlight
+    /// queries compile once for the app, not per document window.
     public convenience init(
         grammarName: String?,
         fileExtension: String? = nil,
-        registry: GrammarRegistry = GrammarRegistry(),
+        registry: GrammarRegistry = .shared,
         theme: SyntaxTheme = .system
     ) {
         guard let grammarName else {

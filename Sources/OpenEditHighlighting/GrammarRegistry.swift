@@ -47,6 +47,12 @@ public struct GrammarRegistry: Sendable {
         "python", "json", "markdown", "toml", "yaml"
     ]
 
+    /// The app's registry: one instance whose query directories are resolved once
+    /// and whose `LanguageConfiguration`s compile all bundled `highlights.scm`
+    /// exactly once, however many documents open. `TreeSitterHighlighter`'s
+    /// convenience init defaults to it; tests construct their own.
+    public static let shared = GrammarRegistry()
+
     private let configurations: [String: Result<LanguageConfiguration, HighlightingDiagnostic>]
 
     public init() {
@@ -152,7 +158,9 @@ public struct GrammarRegistry: Sendable {
         // the grammar bundles. `Bundle.main` is useless under `swift test`,
         // where the process is a generic xctest helper.
         seeds.append(Bundle(for: BundleToken.self).bundleURL)
-        seeds.append(URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent())
+        if let executablePath = CommandLine.arguments.first {
+            seeds.append(URL(fileURLWithPath: executablePath).deletingLastPathComponent())
+        }
         if let testBundle = Bundle.allBundles.first(where: { $0.bundlePath.hasSuffix(".xctest") }) {
             seeds.append(testBundle.bundleURL.deletingLastPathComponent())
         }

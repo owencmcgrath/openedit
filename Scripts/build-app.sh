@@ -18,8 +18,9 @@ cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 # SwiftPM emits a resource bundle per tree-sitter grammar target next to the
 # executable; they hold the highlight queries (AGENTS/GRAMMARS.md). The
 # highlighter resolves them from Bundle.main.resourceURL, so they belong in
-# Contents/Resources.
-for grammar_bundle in "$BIN_PATH"/*.bundle; do
+# Contents/Resources. Only grammar bundles are copied, so an unrelated SwiftPM
+# resource bundle added later is not dragged in accidentally.
+for grammar_bundle in "$BIN_PATH"/TreeSitter*.bundle; do
     [ -e "$grammar_bundle" ] || continue
     cp -R "$grammar_bundle" "$APP_DIR/Contents/Resources/"
 done
