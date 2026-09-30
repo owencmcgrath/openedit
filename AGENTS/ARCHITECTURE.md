@@ -66,15 +66,15 @@ These are the seams between components — pin these down precisely since they l
   - Duplicate extensions: the **later** entry wins (the user file is processed after the bundled defaults), and there is no removal syntax in v1.
   - An invalid entry (wrong type, unknown field, missing required field) is **skipped and reported** with a diagnostic carrying the config path, entry index, language ID, and field; its neighbors and all defaults are untouched. Malformed TOML keeps the defaults and returns a diagnostic. The loader never throws or crashes.
   - Extensions are normalized (trimmed, lowercased, leading dot stripped) before lookup and duplicate detection.
-- **Bundled language inventory.** Grammar/`binaryName` values are names, not verified-working claims — nothing in v1 exercises them yet (#5 highlighting, #7 PATH detection). Do not upgrade a row to "verified" until a test or manual check proves it.
+- **Bundled language inventory.** The grammar names are verified for highlighting as of #5 (all five bundle a working parser and `highlights.scm`; see `AGENTS/GRAMMARS.md`). `binaryName`/`installCommand` remain names, not verified-working claims — PATH detection is #7. Do not upgrade a row's LSP columns to "verified" until a test or manual check proves them.
 
   | Language ID | Extensions | Grammar | Binary | Install command | Status |
   |---|---|---|---|---|---|
-  | `python` | `py`, `pyw` | `python` | `pylsp` | `pip install python-lsp-server` | names unverified |
-  | `json` | `json` | `json` | — | — | highlighting-only |
-  | `markdown` | `md`, `markdown` | `markdown` | — | — | highlighting-only |
-  | `toml` | `toml` | `toml` | — | — | highlighting-only |
-  | `yaml` | `yaml`, `yml` | `yaml` | — | — | highlighting-only |
+  | `python` | `py`, `pyw` | `python` | `pylsp` | `pip install python-lsp-server` | grammar verified (#5); binary unverified |
+  | `json` | `json` | `json` | — | — | highlighting-only, grammar verified |
+  | `markdown` | `md`, `markdown` | `markdown` | — | — | highlighting-only, grammar verified |
+  | `toml` | `toml` | `toml` | — | — | highlighting-only, grammar verified |
+  | `yaml` | `yaml`, `yml` | `yaml` | — | — | highlighting-only, grammar verified |
 
 
 ### 5.3 File watcher → Document
@@ -86,6 +86,7 @@ These are the seams between components — pin these down precisely since they l
 
 - On every text change, the document pushes the edited range to the highlighter; the highlighter re-tokenizes synchronously via the tree-sitter incremental parse and applies attributes to the affected range only (not the whole document).
 - **[Default]** No async/background highlighting pipeline (i.e., no Neon-style viewport virtualization) unless real files show it's needed.
+- **[Implemented #5]** The highlighter lives in the `OpenEditHighlighting` module (AppKit + `SwiftTreeSitter` + the bundled grammars); the app resolves a file's extension → `grammar` name through `OpenEditConfig` and hands it that name. It applies `InputEdit`s in UTF-16 coordinates (the binding is driven in UTF-16LE, so byte offsets are twice the code-unit offsets) and re-attributes the union of the edit and tree-sitter's `changedRanges`, expanded to whole lines. Attribute-only writes are filtered out of `NSTextStorageDelegate` so they never register as document changes, touch undo, or fight find/selection styling. A missing config mapping or an unbundled grammar leaves the text plain and editable with a `HighlightingDiagnostic` naming the cause. Grammars are pinned and their resource bundles are described in `AGENTS/GRAMMARS.md`. No departure from the synchronous `[Default]`.
 
 ### 5.5 Document → LSP client
 

@@ -1,17 +1,29 @@
 import AppKit
+import OpenEditHighlighting
 
 /// Window for one open document: the text view, scroll view, and gutter, with
 /// user edits forwarded to the TextDocument for standard NSDocument dirty
 /// tracking (ARCHITECTURE.md 5.11) and reloads pushed back in from the
 /// document's watcher (5.3).
-final class DocumentWindowController: NSWindowController, NSTextViewDelegate {
+///
+/// The window also owns the tree-sitter highlighter (5.4): `NSTextStorage`
+/// character edits drive an incremental re-highlight, while the highlighter's
+/// own attribute edits are ignored so they never register as document changes
+/// or fight undo/find styling.
+final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NSTextStorageDelegate {
+    private let textStorage: NSTextStorage
     private let scrollView: NSScrollView
     private let textView: NSTextView
     private let lineNumberRuler: LineNumberRulerView
+    private let highlighter: TreeSitterHighlighter
 
     /// Guard so programmatic text application (initial load, silent reload,
     /// reload from the conflict prompt) is not counted as a user edit.
     private var isApplyingDocumentText = false
+
+    /// Guard so attribute writes performed by the highlighter are not treated as
+    /// user edits (they arrive as `didProcessEditing` with `.editedAttributes`).
+    private var isApplyingHighlight = false
 
     var textDocument: TextDocument? {
         document as? TextDocument
@@ -19,6 +31,7 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate {
 
     init(document: TextDocument) {
         let textStorage = NSTextStorage()
+        self.textStorage = textStorage
         let layoutManager = NSLayoutManager()
         textStorage.addLayoutManager(layoutManager)
 
@@ -72,11 +85,20 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate {
         window.setFrameAutosaveName("OpenEditDocumentWindow")
         window.title = document.displayName
 
+        highlighter = TreeSitterHighlighter(
+            grammarName: DocumentLanguageMapping.grammarName(for: document.fileURL),
+            fileExtension: document.fileURL?.pathExtension
+        )
+
         super.init(window: window)
 
         editorTextView.string = document.text
         editorTextView.undoManager?.removeAllActions()
         editorTextView.delegate = self
+        highlightAll()
+        // Set last: the highlighter's own attribute writes must not be observed
+        // as edits, and the initial full highlight is not a user edit.
+        textStorage.delegate = self
     }
 
     @available(*, unavailable)
@@ -95,13 +117,41 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate {
     /// watcher-driven reloads.)
     func applyText(_ newText: String) {
         isApplyingDocumentText = true
-        defer { isApplyingDocumentText = false }
         textView.string = newText
         textView.undoManager?.removeAllActions()
+        highlightAll()
+        isApplyingDocumentText = false
+    }
+
+    // MARK: - Highlighting (ARCHITECTURE.md 5.4)
+
+    private func highlightAll() {
+        isApplyingHighlight = true
+        highlighter.highlightAll(in: textStorage)
+        isApplyingHighlight = false
+    }
+
+    /// Called after a character edit. The highlighter reparses incrementally and
+    /// re-attributes only the affected range; `.editedAttributes` rounds (the
+    /// highlighter's own writes) are ignored.
+    func textStorage(
+        _ textStorage: NSTextStorage,
+        didProcessEditing editedMask: NSTextStorageEditActions,
+        range editedRange: NSRange,
+        changeInLength delta: Int
+    ) {
+        guard editedMask.contains(.editedCharacters),
+              !isApplyingDocumentText,
+              !isApplyingHighlight
+        else { return }
+
+        isApplyingHighlight = true
+        highlighter.applyEdit(in: textStorage, editedRange: editedRange, changeInLength: delta)
+        isApplyingHighlight = false
     }
 
     func textDidChange(_ notification: Notification) {
-        guard !isApplyingDocumentText, let textDocument else { return }
+        guard !isApplyingDocumentText, !isApplyingHighlight, let textDocument else { return }
         textDocument.noteTextEdited(textView.string)
     }
 }
