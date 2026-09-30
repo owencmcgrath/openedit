@@ -47,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMainMenu()
         hasFinishedLaunching = true
 
+        // Request notification authorization at first launch (ARCHITECTURE.md
+        // 5.6); denial never blocks opening files. The notifier also asks again
+        // lazily before a notice, in case this runs before the user decides.
+        MissingLSPServerNotification.shared.start()
+
         for url in launchArgumentURLs() {
             openFile(at: url)
         }

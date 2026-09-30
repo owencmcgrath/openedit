@@ -1,5 +1,6 @@
 import AppKit
 import OpenEditHighlighting
+import OpenEditLSP
 
 /// Window for one open document: the text view, scroll view, and gutter, with
 /// user edits forwarded to the TextDocument for standard NSDocument dirty
@@ -99,6 +100,8 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         // Set last: the highlighter's own attribute writes must not be observed
         // as edits, and the initial full highlight is not a user edit.
         textStorage.delegate = self
+
+        notifyIfLanguageServerMissing()
     }
 
     @available(*, unavailable)
@@ -153,5 +156,22 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
     func textDidChange(_ notification: Notification) {
         guard !isApplyingDocumentText, !isApplyingHighlight, let textDocument else { return }
         textDocument.noteTextEdited(textView.string)
+    }
+
+    // MARK: - Missing LSP notice (ARCHITECTURE.md 5.6)
+
+    /// Resolve the document's language server once, on open, and hand the
+    /// result to the notifier. This availability check is also what #6's
+    /// process pool must consult before spawning, so one open event yields one
+    /// verdict and cannot both warn and launch.
+    private func notifyIfLanguageServerMissing() {
+        guard let language = DocumentLanguageMapping.resolvedLanguage(for: document?.fileURL) else {
+            return
+        }
+        let availability = LanguageServerLocator.resolve(language: language)
+        MissingLSPServerNotification.shared.handleDocumentOpen(
+            language: language,
+            availability: availability
+        )
     }
 }
