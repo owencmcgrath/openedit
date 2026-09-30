@@ -99,6 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // Ask every live language server to shut down (ARCHITECTURE.md 5.5);
+        // `shutdownAndExit` closes the process handles itself, so a slow or
+        // unresponsive server cannot keep the app alive.
+        Task { await LanguageServerPool.shared.shutdownAll() }
+    }
+
     // MARK: - File opening
 
     private func openFile(at url: URL?) {

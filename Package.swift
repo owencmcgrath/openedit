@@ -108,6 +108,13 @@ let package = Package(
                 ])
             ]
         ),
+        // Controlled language server for #6's tests (not shipped with the
+        // app). Behavior is driven by a JSON config path in the
+        // OPENEDIT_TEST_LSP_CONFIG environment variable; see its main.swift.
+        .executableTarget(
+            name: "lsp-test-server",
+            path: "Sources/LSPTestServer"
+        ),
         .testTarget(
             name: "OpenEditConfigTests",
             dependencies: ["OpenEditConfig"],
@@ -124,6 +131,5 @@ let package = Package(
             name: "OpenEditLSPTests",
             dependencies: ["OpenEditLSP", "OpenEditConfig"],
             path: "Tests/OpenEditLSPTests"
-        )
-    ]
+        )    ]
 )

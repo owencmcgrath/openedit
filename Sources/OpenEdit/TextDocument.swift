@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OpenEditLSP
 
 /// Identity snapshot of a file on disk, used to coalesce watcher events for a
 /// single write (including the echo of this document's own save) into one
@@ -73,6 +74,28 @@ final class TextDocument: NSDocument {
 
     override func makeWindowControllers() {
         addWindowController(DocumentWindowController(document: self))
+        startLanguageServerFlow()
+    }
+
+    /// One document-open event for the language-server side (ARCHITECTURE.md
+    /// 5.5/5.6): resolve the config entry and the server's availability once,
+    /// hand the single verdict to both the missing-LSP notice (#7) and the
+    /// process pool (#6), so one open cannot both warn and launch.
+    private func startLanguageServerFlow() {
+        guard let fileURL,
+              let language = DocumentLanguageMapping.resolvedLanguage(for: fileURL)
+        else { return }
+
+        let availability = LanguageServerLocator.resolve(language: language)
+        MissingLSPServerNotification.shared.handleDocumentOpen(
+            language: language,
+            availability: availability
+        )
+        LanguageServerPool.shared.documentOpened(
+            fileURL: fileURL,
+            initialText: text,
+            availability: availability
+        )
     }
 
     override func writeSafely(
@@ -89,6 +112,7 @@ final class TextDocument: NSDocument {
 
     override func close() {
         watcher?.stop()
+        LanguageServerPool.shared.documentClosed(fileURL: fileURL)
         super.close()
     }
 
@@ -99,6 +123,7 @@ final class TextDocument: NSDocument {
     func noteTextEdited(_ newText: String) {
         text = newText
         updateChangeCount(.changeDone)
+        LanguageServerPool.shared.documentEdited(fileURL: fileURL, newText: newText)
     }
 
     /// Programmatic text application (initial load, silent reload, reload
@@ -110,6 +135,9 @@ final class TextDocument: NSDocument {
             controller.applyText(newText)
         }
         updateChangeCount(.changeCleared)
+        // A reload changes the server's view of the file just like an edit;
+        // full-document sync makes it one didChange.
+        LanguageServerPool.shared.documentEdited(fileURL: fileURL, newText: newText)
     }
 
     // MARK: - External changes (ARCHITECTURE.md 5.3)
