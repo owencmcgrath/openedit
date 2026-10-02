@@ -1,4 +1,5 @@
 import AppKit
+import OpenEditLSP
 
 /// NSDocumentController subclass carrying the launch-settle behavior: Untitled
 /// documents created by the launch machinery (AppKit's untitled-at-launch
@@ -46,6 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
         hasFinishedLaunching = true
+
+        // Route server notifications (diagnostics) to the owning window
+        // (ARCHITECTURE.md 5.9); each controller filters by its document URI.
+        LanguageServerPool.shared.onServerNotification = { _, message in
+            AppDelegate.routeServerNotification(message)
+        }
 
         // Request notification authorization at first launch (ARCHITECTURE.md
         // 5.6); denial never blocks opening files. The notifier also asks again
@@ -97,6 +104,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    /// Fan a server notification out to every open document window; each
+    /// controller ignores notifications for other documents.
+    private static func routeServerNotification(_ message: JSONRPCMessage) {
+        guard message.method == "textDocument/publishDiagnostics",
+              let publish = DiagnosticsPublish.parse(params: message.params)
+        else { return }
+        for document in NSDocumentController.shared.documents {
+            guard let textDocument = document as? TextDocument else { continue }
+            for controller in textDocument.windowControllers.compactMap({ $0 as? DocumentWindowController }) {
+                controller.applyDiagnostics(publish)
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

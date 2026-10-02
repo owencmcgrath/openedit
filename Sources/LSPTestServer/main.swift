@@ -151,9 +151,12 @@ func sendGarbage() {
 
 var diagnosticsSent = false
 
-func maybeSendDiagnostics() {
+func maybeSendDiagnostics(uri: String, version: Int?) {
     guard let diagnostics = config.diagnostics else { return }
-    var payload: [String: Any] = ["uri": "file:///test/diagnostic-target"]
+    var payload: [String: Any] = ["uri": uri]
+    if let version {
+        payload["version"] = version
+    }
     var items: [[String: Any]] = []
     if diagnostics.severity > 0 {
         items.append([
@@ -209,7 +212,11 @@ func handle(_ envelope: [String: Any]) -> Bool {
             log("out", ["crash": true])
             exit(1)
         }
-        maybeSendDiagnostics()
+        let openedDocument = (envelope["params"] as? [String: Any])?["textDocument"] as? [String: Any]
+        maybeSendDiagnostics(
+            uri: openedDocument?["uri"] as? String ?? "file:///test/diagnostic-target",
+            version: openedDocument?["version"] as? Int
+        )
         return true
 
     case "textDocument/didClose":
