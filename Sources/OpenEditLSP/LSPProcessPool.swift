@@ -120,6 +120,40 @@ public final class LSPProcessPool {
         }
     }
 
+    // MARK: - Diagnostics and hover (ARCHITECTURE.md 5.9)
+
+    /// The version the client last sent for this document, for rejecting
+    /// stale diagnostics. Nil when the document is not (or no longer) served.
+    public func trackedVersion(fileURL: URL?) -> Int? {
+        guard let fileURL, let uri = FileURI.make(from: fileURL) else { return nil }
+        return documents[uri]?.version
+    }
+
+    /// `textDocument/hover` at a position, as plain text. Returns nil when the
+    /// document is not served or the server has no hover there; never throws,
+    /// so a caller can fire it without blocking typing.
+    public func requestHover(fileURL: URL?, position: LSPPosition) async -> String? {
+        guard let fileURL, let uri = FileURI.make(from: fileURL),
+              let document = documents[uri],
+              let client = clients[document.languageID],
+              client.isReady
+        else { return nil }
+
+        let params = JSONValue.object([
+            "textDocument": .object(["uri": .string(uri)]),
+            "position": .object([
+                "line": .number(NSNumber(value: position.line)),
+                "character": .number(NSNumber(value: position.character)),
+            ]),
+        ])
+        guard let result = try? await client.sendRequest("textDocument/hover", params: params) else {
+            return nil
+        }
+        // A response that lost a race with an edit or close is meaningless.
+        guard documents[uri] != nil else { return nil }
+        return LSPHover.plainText(from: result)
+    }
+
     // MARK: - Internals
 
     private func openDocument(uri: String, languageID: String, executablePath: String) async {

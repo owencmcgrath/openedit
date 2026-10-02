@@ -110,6 +110,9 @@ import OpenEditConfig
         if diagnostics.isEmpty {
             Issue.record("publishDiagnostics params were: \(String(describing: received.first))")
         }
+        // The server echoes the opened document's URI and version.
+        #expect(received.first?["uri"]?.stringValue == pythonURL("diag").absoluteString)
+        #expect(received.first?["version"]?.intValue == 1)
         #expect(diagnostics.count == 1)
         #expect(diagnostics.first?["message"]?.stringValue == "unused variable 'x'")
         #expect(diagnostics.first?["severity"]?.intValue == 2)
