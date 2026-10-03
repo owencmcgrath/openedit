@@ -1,5 +1,4 @@
 import AppKit
-import OpenEditConfig
 import OpenEditLSP
 
 /// #8's Settings window (ARCHITECTURE.md 5.6): the app menu's Settings item and
@@ -10,6 +9,7 @@ import OpenEditLSP
 final class SettingsWindowController: NSWindowController {
     private let entriesStack = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "No language server notices are dismissed.")
+    private let scrollView = NSScrollView()
     private let settings: MissingLSPDismissalSettings
 
     init(
@@ -21,12 +21,13 @@ final class SettingsWindowController: NSWindowController {
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Settings"
         window.isReleasedWhenClosed = false
+        window.contentMinSize = NSSize(width: 360, height: 200)
 
         super.init(window: window)
         buildContentView()
@@ -45,7 +46,11 @@ final class SettingsWindowController: NSWindowController {
         window?.center()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     // MARK: - Content
@@ -63,22 +68,47 @@ final class SettingsWindowController: NSWindowController {
         entriesStack.orientation = .vertical
         entriesStack.alignment = .width
         entriesStack.spacing = 6
+        entriesStack.translatesAutoresizingMaskIntoConstraints = false
+
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = entriesStack
 
         emptyLabel.textColor = .secondaryLabelColor
-
-        let stack = NSStackView(views: [title, subtitle, entriesStack, emptyLabel])
-        stack.orientation = .vertical
-        stack.alignment = .width
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let contentView = NSView()
-        contentView.addSubview(stack)
+        contentView.addSubview(title)
+        contentView.addSubview(subtitle)
+        contentView.addSubview(scrollView)
+        contentView.addSubview(emptyLabel)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -20)
+            title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+
+            subtitle.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            subtitle.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+
+            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            scrollView.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 12),
+            scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 80),
+
+            emptyLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -20),
+            emptyLabel.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 12),
+
+            entriesStack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            entriesStack.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            entriesStack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor)
         ])
         window?.contentView = contentView
     }
@@ -91,6 +121,7 @@ final class SettingsWindowController: NSWindowController {
 
         let entries = settings.entries()
         emptyLabel.isHidden = !entries.isEmpty
+        scrollView.isHidden = entries.isEmpty
         for entry in entries {
             entriesStack.addArrangedSubview(makeRow(for: entry))
         }
@@ -109,6 +140,7 @@ final class SettingsWindowController: NSWindowController {
         )
         resetButton.bezelStyle = .rounded
         resetButton.identifier = NSUserInterfaceItemIdentifier(entry.languageID)
+        resetButton.setAccessibilityLabel("Reset \(entry.displayName)")
 
         let row = NSStackView(views: [label, NSView(), resetButton])
         row.orientation = .horizontal
