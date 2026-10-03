@@ -37,6 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hasFinishedLaunching = false
     private var pendingOpenURLs: [URL] = []
 
+    /// #8's single Settings window, created on first use.
+    private var settingsWindowController: SettingsWindowController?
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         // The first NSDocumentController instance created becomes the shared
         // one; create ours before AppKit's finishLaunching machinery touches
@@ -223,6 +226,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
+    /// Open #8's Settings window, creating it lazily so the app pays nothing
+    /// until the user asks. The window reloads dismissal state on each present.
+    @objc private func showSettings(_ sender: Any?) {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController()
+        }
+        settingsWindowController?.present()
+    }
+
     /// Save is explicit only (ARCHITECTURE.md 5.11): Cmd-S routes through the
     /// responder chain to NSDocument.save(_:) via standard dirty-state
     /// tracking, with no autosave.
@@ -251,6 +263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
+        appMenu.addItem(.separator())
+        let settingsItem = appMenu.addItem(
+            withTitle: "Settings\u{2026}",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Hide OpenEdit",

@@ -182,6 +182,73 @@ private final class NotificationPresenterSpy: NotificationPresenting {
     }
 }
 
+@Suite struct MissingLSPDismissalSettingsTests {
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "MissingLSPDismissalSettingsTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
+    }
+
+    private func makeSettings(defaults: UserDefaults) -> MissingLSPDismissalSettings {
+        MissingLSPDismissalSettings(
+            store: MissingLSPSuppressionStore(defaults: defaults),
+            registry: LanguageRegistry(languages: BundledLanguages.all)
+        )
+    }
+
+    @Test func listsSuppressedLanguagesWithReadableNames() {
+        let defaults = makeDefaults()
+        let store = MissingLSPSuppressionStore(defaults: defaults)
+        store.suppress(languageID: "python")
+        store.suppress(languageID: "rust")
+
+        let entries = makeSettings(defaults: defaults).entries()
+
+        #expect(entries.map(\.languageID) == ["python", "rust"])
+        #expect(entries.map(\.displayName) == ["Python", "Rust"])
+    }
+
+    @Test func resetClearsOnlyOneLanguageAndPersists() {
+        let defaults = makeDefaults()
+        let store = MissingLSPSuppressionStore(defaults: defaults)
+        store.suppress(languageID: "python")
+        store.suppress(languageID: "rust")
+
+        // A fresh settings over the same defaults represents the Settings window
+        // reopening; reset must persist for the next launch too.
+        makeSettings(defaults: defaults).reset(languageID: "python")
+
+        let afterRelaunch = MissingLSPSuppressionStore(defaults: defaults)
+        #expect(!afterRelaunch.isSuppressed(languageID: "python"))
+        #expect(afterRelaunch.isSuppressed(languageID: "rust"))
+    }
+
+    /// A language removed from the registry keeps its dismissal and stays
+    /// listed (5.6); a mapping change must not silently discard the choice.
+    @Test func removedLanguageStaysListedAndResettable() {
+        let defaults = makeDefaults()
+        MissingLSPSuppressionStore(defaults: defaults).suppress(languageID: "ruby")
+
+        let settings = makeSettings(defaults: defaults)
+        let entries = settings.entries()
+        #expect(entries.map(\.languageID) == ["ruby"])
+        #expect(entries.first?.isConfigured == false)
+        #expect(entries.first?.displayName == "Ruby")
+
+        settings.reset(languageID: "ruby")
+        #expect(!MissingLSPSuppressionStore(defaults: defaults).isSuppressed(languageID: "ruby"))
+    }
+
+    @Test func configuredLanguageIsMarkedConfigured() {
+        let defaults = makeDefaults()
+        MissingLSPSuppressionStore(defaults: defaults).suppress(languageID: "python")
+
+        let entry = makeSettings(defaults: defaults).entries().first
+        #expect(entry?.isConfigured == true)
+    }
+}
+
 @Suite struct MissingLSPNotifierTests {
     private func makeDefaults() -> UserDefaults {
         let suiteName = "MissingLSPNotifierTests.\(UUID().uuidString)"
