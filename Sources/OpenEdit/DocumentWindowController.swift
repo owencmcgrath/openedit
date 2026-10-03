@@ -33,6 +33,11 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
     /// user edits (they arrive as `didProcessEditing` with `.editedAttributes`).
     private var isApplyingHighlight = false
 
+    /// Last file URL whose type icon was applied to the window, so the
+    /// per-keystroke `synchronizeWindowTitleWithDocumentName()` pass doesn't
+    /// re-query LaunchServices on every edit.
+    private var iconFileURL: URL?
+
     var textDocument: TextDocument? {
         document as? TextDocument
     }
@@ -114,11 +119,36 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         // Set last: the highlighter's own attribute writes must not be observed
         // as edits, and the initial full highlight is not a user edit.
         textStorage.delegate = self
+        refreshDocumentIcon()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Keep the title-bar proxy icon in step with the document's file URL.
+    /// AppKit calls this whenever the document's display name or dirty state
+    /// changes, which is exactly when Save As hands the document its `fileURL`.
+    override func synchronizeWindowTitleWithDocumentName() {
+        super.synchronizeWindowTitleWithDocumentName()
+        refreshDocumentIcon()
+    }
+
+    /// Show the macOS-provided icon for the file's type in the title bar
+    /// (ARCHITECTURE.md 5.12). Presentation only — `TextDocument.fileType`
+    /// stays `public.plain-text` (5.11), so saving is unaffected. Untitled
+    /// documents (no `fileURL`) clear the proxy icon and show nothing; the
+    /// generic fallback comes from LaunchServices for unclaimed extensions.
+    private func refreshDocumentIcon() {
+        guard let window else { return }
+        let fileURL = textDocument?.fileURL
+        guard fileURL != iconFileURL else { return }
+        iconFileURL = fileURL
+        window.representedURL = fileURL
+        guard let fileURL else { return }
+        window.standardWindowButton(.documentIconButton)?.image =
+            NSWorkspace.shared.icon(forFile: fileURL.path)
     }
 
     override func showWindow(_ sender: Any?) {
