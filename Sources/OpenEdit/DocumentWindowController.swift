@@ -12,6 +12,11 @@ import OpenEditLSP
 /// own attribute edits are ignored so they never register as document changes
 /// or fight undo/find styling.
 final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NSTextStorageDelegate {
+    /// Shared tabbing identifier so the app can group document windows into one
+    /// native tab group when a file reuses the frontmost window
+    /// (ARCHITECTURE.md 5.1).
+    static let tabbingIdentifier = "OpenEditDocument"
+
     private let textStorage: NSTextStorage
     private let layoutManager: NSLayoutManager
     private let scrollView: NSScrollView
@@ -97,6 +102,7 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         window.contentView = scrollView
         window.center()
         window.setFrameAutosaveName("OpenEditDocumentWindow")
+        window.tabbingIdentifier = Self.tabbingIdentifier
         window.title = document.displayName
 
         highlighter = TreeSitterHighlighter(

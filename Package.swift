@@ -95,9 +95,17 @@ let package = Package(
             dependencies: ["OpenEditConfig"],
             path: "Sources/OpenEditLSP"
         ),
+        // Open-placement routing (ARCHITECTURE.md 5.1). Split out from the
+        // AppKit shell for the same reason as the other modules: the custom
+        // `openedit://` URL parsing and the reuse-vs-new-window decision are
+        // Foundation-only and testable without a window server.
+        .target(
+            name: "OpenEditWindowing",
+            path: "Sources/OpenEditWindowing"
+        ),
         .executableTarget(
             name: "OpenEdit",
-            dependencies: ["OpenEditConfig", "OpenEditHighlighting", "OpenEditLSP"],
+            dependencies: ["OpenEditConfig", "OpenEditHighlighting", "OpenEditLSP", "OpenEditWindowing"],
             path: "Sources/OpenEdit",
             linkerSettings: [
                 .unsafeFlags([
@@ -131,5 +139,10 @@ let package = Package(
             name: "OpenEditLSPTests",
             dependencies: ["OpenEditLSP", "OpenEditConfig"],
             path: "Tests/OpenEditLSPTests"
+        ),
+        .testTarget(
+            name: "OpenEditWindowingTests",
+            dependencies: ["OpenEditWindowing"],
+            path: "Tests/OpenEditWindowingTests"
         )    ]
 )

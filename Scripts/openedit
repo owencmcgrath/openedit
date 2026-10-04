@@ -6,9 +6,11 @@
 # Paths are made absolute and checked here because the Apple Event target
 # resolves relative paths against the app's CWD, not the caller's.
 #
-# The app is launched with `open -a` (no -n): -n forces a second process,
-# which breaks instance reuse, and `--args` are ignored when an instance is
-# already running, so files are passed as open-document arguments instead.
+# Default is to reuse the frontmost OpenEdit window: a plain file open
+# (`open -a`, no -n) reuses the running instance and the app tabs the file
+# into the window you are already looking at. `--new-window` opts out by
+# carrying the intent as an `openedit://` host, because `--args` are ignored
+# when an instance is already running and `-n` would force a second process.
 #
 # A blocking $EDITOR mode is deferred (ARCHITECTURE.md 5.1/8); the arg loop
 # below is where a flag like --wait slots in later without reshaping this
@@ -17,7 +19,7 @@
 set -u
 
 usage() {
-    echo "usage: openedit [file ...]" >&2
+    echo "usage: openedit [--new-window] [file ...]" >&2
     exit 2
 }
 
@@ -46,11 +48,40 @@ app_path() {
     return 1
 }
 
+# Percent-encode one path for an `openedit://` query item. Byte-wise (LC_ALL=C)
+# so multibyte UTF-8 paths encode correctly; unreserved characters per RFC 3986
+# pass through.
+urlencode() {
+    local LC_ALL=C
+    local encoded=""
+    local string="$1"
+    local i char
+    for (( i=0; i<${#string}; i++ )); do
+        char="${string:i:1}"
+        case "$char" in
+            [a-zA-Z0-9.~/_-]) encoded+="$char" ;;  # / plus RFC 3986 unreserved
+            *)
+                printf -v char '%%%02X' "'$char"
+                encoded+="$char"
+                ;;
+        esac
+    done
+    printf '%s' "$encoded"
+}
+
+new_window=0
 files=()
 for argument in "$@"; do
     case "$argument" in
         -h|--help)
             usage
+            ;;
+        --new-window)
+            new_window=1
+            ;;
+        --reuse-window)
+            # Explicit form of the default; accepted for symmetry.
+            new_window=0
             ;;
         -*)
             echo "openedit: unsupported option: $argument" >&2
@@ -80,7 +111,26 @@ if [[ -z "$APP" ]]; then
 fi
 
 if [[ ${#files[@]} -eq 0 ]]; then
+    if (( new_window )); then
+        # There is no path to carry the opt-out in an `openedit://` URL (and an
+        # empty new window has no meaning distinct from the default), so reject
+        # the combination rather than silently ignoring the flag.
+        echo "openedit: --new-window requires at least one file" >&2
+        exit 2
+    fi
     exec open -a "$APP"
+fi
+
+if (( new_window )); then
+    # Carry the opt-out as a custom-scheme URL; -a forces delivery to OpenEdit
+    # even though the URL has no file path for LaunchServices to resolve.
+    url="openedit://new-window"
+    separator="?"
+    for file in "${files[@]}"; do
+        url+="${separator}path=$(urlencode "$file")"
+        separator="&"
+    done
+    exec open -a "$APP" "$url"
 fi
 
 exec open -a "$APP" "${files[@]}"

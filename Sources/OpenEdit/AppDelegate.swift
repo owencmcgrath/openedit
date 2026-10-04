@@ -1,13 +1,29 @@
 import AppKit
 import OpenEditLSP
+import OpenEditWindowing
 
-/// NSDocumentController subclass carrying the launch-settle behavior: Untitled
-/// documents created by the launch machinery (AppKit's untitled-at-launch
-/// pass and the bare-executable fallbacks all route through
-/// `openUntitledDocumentAndDisplay`) are flagged on TextDocument, and the
-/// first real-file open afterwards drops the empty ones — deterministically,
-/// whenever the file arrives, instead of on a fixed timer.
+/// NSDocumentController subclass that owns document placement and the
+/// launch-settle behavior.
+///
+/// Placement (ARCHITECTURE.md 5.1): AppKit delivers file-open Apple Events
+/// (`odoc`) straight to this controller, not through the app delegate (which
+/// only sees URL-scheme opens), so this override is the seam where
+/// reuse-vs-new-window is decided. It reads `pendingIntent` for programmatic
+/// opens (the `--new-window` opt-out) and defaults to reuse. It forces
+/// `display: false` on the superclass so it can tab a reusing document into the
+/// frontmost window instead of letting NSDocumentController order a new window
+/// front.
+///
+/// Launch-settle: Untitled documents created by the launch machinery are
+/// flagged on TextDocument, and the first real-file open afterwards drops the
+/// empty ones — deterministically, whenever the file arrives, instead of on a
+/// fixed timer.
 final class OpenEditDocumentController: NSDocumentController {
+    /// Intent for the next programmatic open. AppKit's odoc handling calls
+    /// `openDocument` directly, so a plain file open leaves this `nil` and
+    /// defaults to reuse; the CLI's `--new-window` opt-out sets it first.
+    static var pendingIntent: OpenIntent?
+
     override func openUntitledDocumentAndDisplay(_ display: Bool) throws -> NSDocument {
         let document = try super.openUntitledDocumentAndDisplay(display)
         if let textDocument = document as? TextDocument, textDocument.fileURL == nil {
@@ -21,12 +37,33 @@ final class OpenEditDocumentController: NSDocumentController {
         display displayDocument: Bool,
         completionHandler completionHandlerForDocuments: @escaping (NSDocument?, Bool, Error?) -> Void
     ) {
+        let intent = Self.pendingIntent ?? .reuseExistingWindow
+        Self.pendingIntent = nil
+        // Resolve the reuse target before the open can make a new window
+        // frontmost. A new-window intent always resolves to a new window, so
+        // skip the window scan the router would discard anyway.
+        let reuseTarget = intent == .newWindow ? nil : DocumentPlacement.reuseTarget(for: intent)
+
         super.openDocument(
             withContentsOf: url,
-            display: displayDocument
+            display: false
         ) { document, documentWasAlreadyOpen, error in
             if document != nil {
                 TextDocument.settleLaunchedUntitledDocuments()
+            }
+            if let document, error == nil {
+                if document.windowControllers.isEmpty {
+                    document.makeWindowControllers()
+                }
+                if let controller = document.windowControllers.first {
+                    if documentWasAlreadyOpen {
+                        // Dedup: bring the existing window forward (5.1).
+                        controller.showWindow(nil)
+                        controller.window?.makeKeyAndOrderFront(nil)
+                    } else {
+                        DocumentPlacement.present(controller, intent: intent, reusing: reuseTarget)
+                    }
+                }
             }
             completionHandlerForDocuments(document, documentWasAlreadyOpen, error)
         }
@@ -77,10 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MissingLSPServerNotification.shared.start()
 
         for url in launchArgumentURLs() {
-            openFile(at: url)
+            openFile(at: url, intent: .reuseExistingWindow)
         }
         for url in pendingOpenURLs {
-            openFile(at: url)
+            handleOpenURL(url)
         }
         pendingOpenURLs.removeAll()
 
@@ -90,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !hasDocumentTypes, NSDocumentController.shared.documents.isEmpty {
             DispatchQueue.main.async { [weak self] in
                 guard let self, NSDocumentController.shared.documents.isEmpty else { return }
-                self.openFile(at: nil)
+                self.openFile(at: nil, intent: .reuseExistingWindow)
             }
         }
 
@@ -110,17 +147,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// with it the Dock icon — until the user opens a file.
     func applicationDidBecomeActive(_ notification: Notification) {
         if !hasDocumentTypes, !dockPresence.isHidden, NSDocumentController.shared.documents.isEmpty {
-            openFile(at: nil)
+            openFile(at: nil, intent: .reuseExistingWindow)
         }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         if hasFinishedLaunching {
-            urls.forEach(openFile(at:))
+            urls.forEach(handleOpenURL(_:))
         } else {
             pendingOpenURLs.append(contentsOf: urls)
         }
     }
+
+    /// Route one Apple Event URL: an `openedit://` request carries an explicit
+    /// intent (the `--new-window` opt-out, ARCHITECTURE.md 5.1); anything else
+    /// is a plain file open, which defaults to reusing the frontmost window.
+    private func handleOpenURL(_ url: URL) {
+        if let request = OpenURLInterpreter.interpret(url) {
+            for fileURL in request.fileURLs {
+                openFile(at: fileURL, intent: request.intent)
+            }
+        } else if url.scheme?.lowercased() != OpenURLScheme.scheme {
+            // A plain file URL defaults to reusing the frontmost window. A
+            // recognized-but-unparseable `openedit://` URL is ignored rather
+            // than treated as a file, which would surface a bogus "not found".
+            openFile(at: url, intent: .reuseExistingWindow)
+        }
+    }
+
+    /// File-open Apple Events (`odoc`) are handled by `NSDocumentController`
+    /// (and thus `OpenEditDocumentController.openDocument`, the placement seam);
+    /// URL-scheme opens arrive in `application(_:open:)` above.
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -149,11 +206,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - File opening
 
-    private func openFile(at url: URL?) {
+    private func openFile(at url: URL?, intent: OpenIntent) {
         if hasDocumentTypes {
-            // Bundled app: NSDocumentController owns the open flow, including
-            // deduping files that are already open and presenting load errors.
+            // Bundled app: NSDocumentController owns the open flow (including
+            // odoc file-open Apple Events, which reach
+            // `OpenEditDocumentController.openDocument`, the placement seam).
+            // Record the intent for that override, then open; it decides
+            // reuse-vs-new-window and presents the document (ARCHITECTURE.md
+            // 5.1).
             if let canonicalURL = url?.resolvingSymlinksInPath() {
+                OpenEditDocumentController.pendingIntent = intent
                 NSDocumentController.shared.openDocument(
                     withContentsOf: canonicalURL,
                     display: true,
@@ -187,16 +249,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        createManualDocument(at: canonicalURL)
+        createManualDocument(at: canonicalURL, intent: intent)
     }
 
-    private func createManualDocument(at canonicalURL: URL?) {
+    private func createManualDocument(at canonicalURL: URL?, intent: OpenIntent) {
         do {
+            let reuseTarget = intent == .newWindow ? nil : DocumentPlacement.reuseTarget(for: intent)
             let newDocument = try canonicalURL.map { try TextDocument(fileAt: $0) } ?? TextDocument()
             NSDocumentController.shared.addDocument(newDocument)
             newDocument.makeWindowControllers()
-            newDocument.showWindows()
-            newDocument.windowControllers.forEach { $0.window?.makeKeyAndOrderFront(nil) }
+            if let controller = newDocument.windowControllers.first {
+                DocumentPlacement.present(controller, intent: intent, reusing: reuseTarget)
+            } else {
+                newDocument.showWindows()
+            }
             if canonicalURL == nil {
                 // Same launch-settle flagging the bundled
                 // OpenEditDocumentController applies to the Untitled fallback.
