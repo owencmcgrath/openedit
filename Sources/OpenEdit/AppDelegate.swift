@@ -81,6 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 5.13).
     private let dockPresence = DockPresenceController()
 
+    /// Follows the system light/dark appearance for the app icon.
+    private let appIcon = AppIconController()
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         // The first NSDocumentController instance created becomes the shared
         // one; create ours before AppKit's finishLaunching machinery touches
@@ -91,6 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
         hasFinishedLaunching = true
+
+        // Match the Dock/app-switcher icon to the system light/dark appearance.
+        appIcon.start()
 
         // Track document-window open/close to toggle the Dock icon
         // (ARCHITECTURE.md 5.13).
