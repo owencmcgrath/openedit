@@ -17,7 +17,7 @@ ifeq ($(shell xcode-select -p),/Library/Developer/CommandLineTools)
 TESTING_PLUGIN_FLAGS := $(if $(wildcard $(CLT_PLUGIN)),-Xswiftc -load-plugin-library -Xswiftc $(CLT_PLUGIN))
 endif
 
-.PHONY: build exec bundle run open test install-cli uninstall-cli clean
+.PHONY: build exec bundle run open test test-cli install-cli uninstall-cli clean
 
 build:
 	swift build -c $(CONFIGURATION)
@@ -32,8 +32,13 @@ exec:
 bundle:
 	./Scripts/build-app.sh $(CONFIGURATION)
 
-test:
+test: test-cli
 	swift test --scratch-path "$(SCRATCH)" --enable-swift-testing --disable-xctest $(TESTING_PLUGIN_FLAGS)
+
+# Flag parsing and forwarding of the CLI shim (ARCHITECTURE.md 5.1); plain
+# bash, no app or window server needed.
+test-cli:
+	./Scripts/tests/openedit-cli-tests.sh
 
 # Normal way to run the app: bundle it, then launch through LaunchServices so
 # it activates and gets standard window chrome.
