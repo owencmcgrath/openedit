@@ -40,8 +40,9 @@ final class OpenEditDocumentController: NSDocumentController {
         let intent = Self.pendingIntent ?? .reuseExistingWindow
         Self.pendingIntent = nil
         // Resolve the reuse target before the open can make a new window
-        // frontmost.
-        let reuseTarget = DocumentPlacement.reuseTarget(for: intent)
+        // frontmost. A new-window intent always resolves to a new window, so
+        // skip the window scan the router would discard anyway.
+        let reuseTarget = intent == .newWindow ? nil : DocumentPlacement.reuseTarget(for: intent)
 
         super.openDocument(
             withContentsOf: url,
@@ -60,7 +61,7 @@ final class OpenEditDocumentController: NSDocumentController {
                         controller.showWindow(nil)
                         controller.window?.makeKeyAndOrderFront(nil)
                     } else {
-                        DocumentPlacement.present(controller, reusing: reuseTarget)
+                        DocumentPlacement.present(controller, intent: intent, reusing: reuseTarget)
                     }
                 }
             }
@@ -160,7 +161,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for fileURL in request.fileURLs {
                 openFile(at: fileURL, intent: request.intent)
             }
-        } else {
+        } else if url.scheme?.lowercased() != OpenURLScheme.scheme {
+            // A plain file URL defaults to reusing the frontmost window. A
+            // recognized-but-unparseable `openedit://` URL is ignored rather
+            // than treated as a file, which would surface a bogus "not found".
             openFile(at: url, intent: .reuseExistingWindow)
         }
     }
@@ -244,12 +248,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createManualDocument(at canonicalURL: URL?, intent: OpenIntent) {
         do {
-            let reuseTarget = DocumentPlacement.reuseTarget(for: intent)
+            let reuseTarget = intent == .newWindow ? nil : DocumentPlacement.reuseTarget(for: intent)
             let newDocument = try canonicalURL.map { try TextDocument(fileAt: $0) } ?? TextDocument()
             NSDocumentController.shared.addDocument(newDocument)
             newDocument.makeWindowControllers()
             if let controller = newDocument.windowControllers.first {
-                DocumentPlacement.present(controller, reusing: reuseTarget)
+                DocumentPlacement.present(controller, intent: intent, reusing: reuseTarget)
             } else {
                 newDocument.showWindows()
             }

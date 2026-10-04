@@ -31,11 +31,29 @@ enum DocumentPlacement {
     }
 
     /// Show a freshly opened document: tab it into `reuseTarget` when one is
-    /// given, otherwise order its own window front.
-    static func present(_ controller: NSWindowController, reusing reuseTarget: NSWindow?) {
+    /// given, otherwise order its own window front. `intent` is needed to tell
+    /// an explicit new-window open (which must not be auto-merged into an
+    /// existing tab group) from a reuse open that simply found no window to
+    /// reuse.
+    static func present(
+        _ controller: NSWindowController,
+        intent: OpenIntent,
+        reusing reuseTarget: NSWindow?
+    ) {
         guard let window = controller.window else { return }
         if let reuseTarget, reuseTarget !== window {
+            // The target may be a window from an earlier `.newWindow` open whose
+            // identifier was cleared; restore the shared identifier so the two
+            // windows can form a tab group.
+            reuseTarget.tabbingIdentifier = DocumentWindowController.tabbingIdentifier
             reuseTarget.addTabbedWindow(window, ordered: .above)
+        } else if intent == .newWindow {
+            // An explicit new-window open must not be silently merged into an
+            // existing tab group by AppKit's automatic window tabbing (the
+            // user's "prefer tabs" setting). Clearing the shared identifier
+            // makes the window ineligible for automatic tabbing
+            // (ARCHITECTURE.md 5.1).
+            window.tabbingIdentifier = ""
         }
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)

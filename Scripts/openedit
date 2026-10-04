@@ -111,6 +111,13 @@ if [[ -z "$APP" ]]; then
 fi
 
 if [[ ${#files[@]} -eq 0 ]]; then
+    if (( new_window )); then
+        # There is no path to carry the opt-out in an `openedit://` URL (and an
+        # empty new window has no meaning distinct from the default), so reject
+        # the combination rather than silently ignoring the flag.
+        echo "openedit: --new-window requires at least one file" >&2
+        exit 2
+    fi
     exec open -a "$APP"
 fi
 
