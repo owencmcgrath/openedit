@@ -14,7 +14,10 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 cp "$BIN_PATH/OpenEdit" "$APP_DIR/Contents/MacOS/OpenEdit"
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
-cp "$ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+
+# App icons: the light default named by CFBundleIconFile plus the light/dark
+# pair AppIconController swaps between at runtime (see its doc comment).
+cp "$ROOT"/Resources/AppIcon*.icns "$APP_DIR/Contents/Resources/"
 
 # SwiftPM emits a resource bundle per tree-sitter grammar target next to the
 # executable; they hold the highlight queries (AGENTS/GRAMMARS.md). The
