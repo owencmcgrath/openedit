@@ -40,6 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// #8's single Settings window, created on first use.
     private var settingsWindowController: SettingsWindowController?
 
+    /// Hides the Dock icon while no document windows are open (ARCHITECTURE.md
+    /// 5.13).
+    private let dockPresence = DockPresenceController()
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         // The first NSDocumentController instance created becomes the shared
         // one; create ours before AppKit's finishLaunching machinery touches
@@ -50,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
         hasFinishedLaunching = true
+
+        // Track document-window open/close to toggle the Dock icon
+        // (ARCHITECTURE.md 5.13).
+        dockPresence.start()
 
         // Route server notifications (diagnostics) to the owning window
         // (ARCHITECTURE.md 5.9); each controller filters by its document URI.
@@ -90,9 +98,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Backstop for the Untitled fallback in case activation is delayed; the
     /// Apple Event ordering note in applicationDidFinishLaunching applies.
     /// Bundled apps get the untitled pass from AppKit, so only the bare
-    /// `swift run` executable (no Info.plist) uses this.
+    /// `swift run` executable (no Info.plist) uses this. Suppressed while the
+    /// app is deliberately hidden (ARCHITECTURE.md 5.13): activating a
+    /// windowless app from the app switcher must not resurrect a window — and
+    /// with it the Dock icon — until the user opens a file.
     func applicationDidBecomeActive(_ notification: Notification) {
-        if !hasDocumentTypes, NSDocumentController.shared.documents.isEmpty {
+        if !hasDocumentTypes, !dockPresence.isHidden, NSDocumentController.shared.documents.isEmpty {
             openFile(at: nil)
         }
     }
