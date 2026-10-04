@@ -17,8 +17,24 @@ import Testing
         LanguageConfigLoader.load(userConfigAt: fixturesDirectory.appendingPathComponent(name))
     }
 
-    private func loadInline(_ toml: String) -> LanguageConfigLoadResult {
-        LanguageConfigLoader.load(userConfigContents: toml, configPath: "/tmp/languages.toml")
+    /// The registry a missing/empty user file yields: the catalog-only
+    /// languages (autodetected, prepended) followed by the explicit bundled
+    /// `[[language]]` entries.
+    private var bundledResolved: [ResolvedLanguage] {
+        BundledKnownServers.all.map(\.asResolvedLanguage) + BundledLanguages.all
+    }
+
+    private func loadInline(
+        _ toml: String,
+        bundledDefaults: [ResolvedLanguage] = BundledLanguages.all,
+        bundledKnownServers: [KnownServer] = BundledKnownServers.all
+    ) -> LanguageConfigLoadResult {
+        LanguageConfigLoader.load(
+            userConfigContents: toml,
+            configPath: "/tmp/languages.toml",
+            bundledDefaults: bundledDefaults,
+            bundledKnownServers: bundledKnownServers
+        )
     }
 
     // MARK: - Missing file / bundled defaults
@@ -29,7 +45,7 @@ import Testing
         )
 
         #expect(result.diagnostics.isEmpty)
-        #expect(result.registry.languages == BundledLanguages.all)
+        #expect(result.registry.languages == bundledResolved)
         #expect(result.registry.language(forExtension: "py")?.languageID == "python")
     }
 
@@ -37,7 +53,7 @@ import Testing
         let result = loadInline("# nothing but comments\n")
 
         #expect(result.diagnostics.isEmpty)
-        #expect(result.registry.languages == BundledLanguages.all)
+        #expect(result.registry.languages == bundledResolved)
     }
 
     @Test func bundledLookupByExtensionNormalizesDotAndCase() {
@@ -51,18 +67,32 @@ import Testing
     }
 
     @Test func bundledInventory() {
-        let byID = Dictionary(uniqueKeysWithValues: BundledLanguages.all.map { ($0.languageID, $0) })
-
-        #expect(Set(byID.keys) == ["python", "json", "markdown", "toml", "yaml"])
-        #expect(byID["python"]?.extensions == ["py", "pyw"])
-        #expect(byID["python"]?.binaryName == "pylsp")
-        #expect(byID["markdown"]?.extensions == ["md", "markdown"])
-        #expect(byID["yaml"]?.extensions == ["yaml", "yml"])
-
+        let languagesByID = Dictionary(uniqueKeysWithValues: BundledLanguages.all.map { ($0.languageID, $0) })
+        #expect(Set(languagesByID.keys) == ["json", "markdown", "toml", "yaml"])
+        #expect(languagesByID["markdown"]?.extensions == ["md", "markdown"])
+        #expect(languagesByID["yaml"]?.extensions == ["yaml", "yml"])
         for highlightingOnlyID in ["json", "markdown", "toml", "yaml"] {
-            #expect(byID[highlightingOnlyID]?.isHighlightingOnly == true, "\(highlightingOnlyID)")
+            #expect(languagesByID[highlightingOnlyID]?.isHighlightingOnly == true, "\(highlightingOnlyID)")
         }
-        #expect(byID["python"]?.isHighlightingOnly == false)
+
+        let serversByID = Dictionary(uniqueKeysWithValues: BundledKnownServers.all.map { ($0.languageID, $0) })
+        #expect(Set(serversByID.keys) == ["python", "rust", "go", "lua"])
+        #expect(serversByID["python"]?.extensions == ["py", "pyw"])
+        #expect(serversByID["python"]?.grammar == "python")
+        #expect(serversByID["python"]?.candidates == ["pylsp", "pyright-langserver"])
+        // No bundled grammar: rust/go/lua are LSP-only, plain text.
+        #expect(serversByID["rust"]?.grammar == nil)
+        #expect(serversByID["go"]?.grammar == nil)
+        #expect(serversByID["lua"]?.grammar == nil)
+
+        // The merged registry exposes catalog languages as non-highlighting-only.
+        let registry = LanguageConfigLoader.load(userConfigAt: nil).registry
+        #expect(registry.language(forLanguageID: "python")?.isHighlightingOnly == false)
+        #expect(registry.language(forLanguageID: "python")?.binaryName == nil)
+        #expect(registry.language(forLanguageID: "python")?.binaryAlternatives == ["pylsp", "pyright-langserver"])
+        #expect(registry.language(forExtension: "rs")?.languageID == "rust")
+        #expect(registry.language(forExtension: "go")?.languageID == "go")
+        #expect(registry.language(forExtension: "lua")?.languageID == "lua")
     }
 
     // MARK: - Overlay semantics
@@ -227,7 +257,7 @@ import Testing
 
         #expect(!result.diagnostics.isEmpty)
         #expect(result.diagnostics.first?.entryIndex == nil)
-        #expect(result.registry.languages == BundledLanguages.all)
+        #expect(result.registry.languages == bundledResolved)
         #expect(result.registry.language(forExtension: "py")?.languageID == "python")
     }
 
@@ -236,7 +266,7 @@ import Testing
 
         #expect(!result.diagnostics.isEmpty)
         #expect(result.diagnostics.first?.field == "language")
-        #expect(result.registry.languages == BundledLanguages.all)
+        #expect(result.registry.languages == bundledResolved)
     }
 
     @Test func descriptionFormatsFileLevelFieldsWithoutPathDot() {
@@ -253,7 +283,7 @@ import Testing
         let result = LanguageConfigLoader.load(userConfigAt: fixturesDirectory)
 
         #expect(!result.diagnostics.isEmpty)
-        #expect(result.registry.languages == BundledLanguages.all)
+        #expect(result.registry.languages == bundledResolved)
     }
 
     // MARK: - Highlighting-only / lspPath
@@ -307,5 +337,159 @@ import Testing
             #expect(result.registry.language(forLanguageID: "x") == nil, "\(lspOnlyField)")
             #expect(result.diagnostics.first?.field == lspOnlyField)
         }
+    }
+
+    // MARK: - Known-server catalog
+
+    /// A user `[[knownServer]]` entry replaces the bundled catalog entry for the
+    /// same `languageId` whole — adding, removing, and reordering candidates.
+    @Test func knownServerOverrideReplacesCandidates() {
+        let result = loadInline(
+            """
+            [[knownServer]]
+            extensions = ["rs"]
+            languageId = "rust"
+            candidates = ["ra-custom"]
+            installCommand = "custom install"
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: [BundledKnownServers.rust]
+        )
+
+        #expect(result.diagnostics.isEmpty)
+        let rust = result.registry.language(forLanguageID: "rust")
+        #expect(rust?.binaryAlternatives == ["ra-custom"])
+        #expect(rust?.installCommand == "custom install")
+        #expect(rust?.grammar == nil)
+        #expect(rust?.isHighlightingOnly == false)
+    }
+
+    @Test func knownServerAddsNewReachableLanguage() {
+        let result = loadInline(
+            """
+            [[knownServer]]
+            extensions = ["rb"]
+            languageId = "ruby"
+            candidates = ["solargraph", "ruby-lsp"]
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: []
+        )
+
+        #expect(result.diagnostics.isEmpty)
+        #expect(result.registry.language(forExtension: "rb")?.languageID == "ruby")
+        let ruby = result.registry.language(forLanguageID: "ruby")
+        #expect(ruby?.binaryAlternatives == ["solargraph", "ruby-lsp"])
+        #expect(ruby?.grammar == nil)
+    }
+
+    /// A `[[language]]` entry claims its `languageId`, so the catalog entry is
+    /// dropped: a server-less language entry is how a user disables autodetection.
+    @Test func languageEntrySuppressesCatalogForSameID() {
+        let result = loadInline(
+            """
+            [[language]]
+            extensions = ["rs"]
+            languageId = "rust"
+            grammar = "rust"
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: [BundledKnownServers.rust]
+        )
+
+        let rust = result.registry.language(forLanguageID: "rust")
+        #expect(rust?.binaryName == nil)
+        #expect(rust?.binaryAlternatives.isEmpty == true)
+        #expect(rust?.isHighlightingOnly == true)
+    }
+
+    /// Explicit `binaryName` config wins; autodetection must not touch it.
+    @Test func explicitBinaryNameWinsOverCatalog() {
+        let result = loadInline(
+            """
+            [[language]]
+            extensions = ["rs"]
+            languageId = "rust"
+            grammar = "rust"
+            binaryName = "rust-analyzer-pinned"
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: [BundledKnownServers.rust]
+        )
+
+        let rust = result.registry.language(forLanguageID: "rust")
+        #expect(rust?.binaryName == "rust-analyzer-pinned")
+        #expect(rust?.binaryAlternatives.isEmpty == true)
+    }
+
+    @Test func knownServerRequiresExtensions() {
+        let result = loadInline(
+            """
+            [[knownServer]]
+            languageId = "ruby"
+            candidates = ["solargraph"]
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: []
+        )
+
+        #expect(result.registry.language(forLanguageID: "ruby") == nil)
+        #expect(result.diagnostics.first?.field == "extensions")
+    }
+
+    @Test func knownServerRequiresCandidates() {
+        let result = loadInline(
+            """
+            [[knownServer]]
+            extensions = ["rb"]
+            languageId = "ruby"
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: []
+        )
+
+        #expect(result.registry.language(forLanguageID: "ruby") == nil)
+        #expect(result.diagnostics.first?.field == "candidates")
+    }
+
+    @Test func knownServerUnknownFieldSkipsEntry() {
+        let result = loadInline(
+            """
+            [[knownServer]]
+            extensions = ["rb"]
+            languageId = "ruby"
+            candidates = ["solargraph"]
+            bogus = true
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: []
+        )
+
+        #expect(result.registry.language(forLanguageID: "ruby") == nil)
+        #expect(result.diagnostics.first?.field == "bogus")
+    }
+
+    @Test func duplicateKnownServerLanguageIDLaterWinsAndIsReported() {
+        let result = loadInline(
+            """
+            [[knownServer]]
+            extensions = ["rb"]
+            languageId = "ruby"
+            candidates = ["first"]
+
+            [[knownServer]]
+            extensions = ["rb"]
+            languageId = "ruby"
+            candidates = ["second"]
+            """,
+            bundledDefaults: [],
+            bundledKnownServers: []
+        )
+
+        #expect(result.registry.language(forLanguageID: "ruby")?.binaryAlternatives == ["second"])
+        #expect(result.diagnostics.count == 1)
+        #expect(result.diagnostics.first?.field == "languageId")
+        #expect(result.diagnostics.first?.languageID == "ruby")
+        #expect(result.diagnostics.first?.entryIndex == 1)
     }
 }

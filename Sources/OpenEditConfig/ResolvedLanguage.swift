@@ -14,11 +14,15 @@ public struct ResolvedLanguage: Equatable, Sendable {
     /// spellings the same way.
     public let extensions: [String]
 
-    /// Tree-sitter grammar name.
-    public let grammar: String
+    /// Tree-sitter grammar name, or `nil` when the language has no bundled
+    /// grammar. `nil` leaves the text plain and editable; it does not by itself
+    /// mean no LSP — a catalog-only language can be LSP-only (`5.2`).
+    public let grammar: String?
 
     /// Executable checked against `PATH` (or `lspPath`) to detect a language
-    /// server. Absent means highlighting-only, no LSP for this language (5.2).
+    /// server. Explicit config: when present it wins over `binaryAlternatives`.
+    /// Absent alongside empty `binaryAlternatives` means highlighting-only, no
+    /// LSP for this language (5.2).
     public let binaryName: String?
 
     /// Human-readable command shown in the missing-LSP notification (5.6).
@@ -29,13 +33,21 @@ public struct ResolvedLanguage: Equatable, Sendable {
     /// installed outside `PATH`. Only meaningful alongside `binaryName`.
     public let lspPath: String?
 
+    /// Ordered candidate binary names from the `[[knownServer]]` catalog, probed
+    /// on `PATH` in order when there is no explicit `binaryName`/`lspPath`
+    /// (ARCHITECTURE.md 5.2/5.6). Empty for an explicit `[[language]]` entry,
+    /// which is what makes "do not autodetect here" expressible as a language
+    /// entry with no `binaryName`.
+    public let binaryAlternatives: [String]
+
     public init(
         languageID: String,
         extensions: [String],
-        grammar: String,
+        grammar: String? = nil,
         binaryName: String? = nil,
         installCommand: String? = nil,
-        lspPath: String? = nil
+        lspPath: String? = nil,
+        binaryAlternatives: [String] = []
     ) {
         self.languageID = languageID
         self.extensions = extensions
@@ -43,10 +55,15 @@ public struct ResolvedLanguage: Equatable, Sendable {
         self.binaryName = binaryName
         self.installCommand = installCommand
         self.lspPath = lspPath
+        self.binaryAlternatives = binaryAlternatives
     }
 
-    /// A language with no `binaryName` has no LSP wiring (ARCHITECTURE.md 5.2).
-    public var isHighlightingOnly: Bool { binaryName == nil }
+    /// A language with no explicit `binaryName` and no catalog candidates has
+    /// no LSP wiring (ARCHITECTURE.md 5.2). A catalog-only language has
+    /// alternatives and is *not* highlighting-only even without a grammar.
+    public var isHighlightingOnly: Bool {
+        binaryName == nil && binaryAlternatives.isEmpty
+    }
 
     /// Canonical form of a file extension or config spelling: trimmed,
     /// lowercased, and without any leading dot. `" .PY "` and `"py"` both become

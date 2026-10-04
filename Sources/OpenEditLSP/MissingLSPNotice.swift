@@ -19,9 +19,12 @@ public struct MissingLSPNotice: Equatable, Sendable {
         if let installCommand = language.installCommand, !installCommand.isEmpty {
             body = installCommand
         } else {
-            // `binaryName` without `installCommand` is valid per 5.2; still tell
-            // the user what was looked for rather than showing an empty body.
-            let binaryName = language.binaryName ?? "the language server"
+            // `binaryName` (or a catalog candidate) without `installCommand` is
+            // valid per 5.2; still tell the user what was looked for rather than
+            // showing an empty body.
+            let binaryName = language.binaryName
+                ?? language.binaryAlternatives.first
+                ?? "the language server"
             body = "\(binaryName) was not found. Install it to enable language features."
         }
     }
