@@ -1,6 +1,7 @@
 import AppKit
 import OpenEditHighlighting
 import OpenEditLSP
+import os
 
 /// Window for one open document: the text view, scroll view, and gutter, with
 /// user edits forwarded to the TextDocument for standard NSDocument dirty
@@ -33,6 +34,17 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
     /// Guard so programmatic text application (initial load, silent reload,
     /// reload from the conflict prompt) is not counted as a user edit.
     private var isApplyingDocumentText = false
+
+    /// Open-path instrumentation (issue #38): the whole-open signpost span and
+    /// the per-stage durations the first-paint marker reports.
+    private var openSpan: OSSignpostIntervalState?
+    private var setTextDurationMS = 0.0
+    private var highlightDurationMS = 0.0
+
+    /// Set when the gutter's cached line starts were patched for the current
+    /// edit, so the NSText.didChangeNotification handler (which fires later in
+    /// the same edit cycle) does not throw them away and force a full rescan.
+    private var gutterPatchedThisEdit = false
 
     /// Guard so attribute writes performed by the highlighter are not treated as
     /// user edits (they arrive as `didProcessEditing` with `.editedAttributes`).
@@ -72,6 +84,10 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         editorTextView.autoresizingMask = [.width]
         editorTextView.textContainerInset = NSSize(width: 4, height: 4)
         editorTextView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        // Unhighlighted text falls back to the view's default color; a dynamic
+        // label color keeps plain regions legible in both appearances without
+        // an attribute sweep over the whole document at open (issue #38).
+        editorTextView.textColor = NSColor.labelColor
         editorTextView.allowsUndo = true
         editorTextView.isRichText = false
         editorTextView.isAutomaticQuoteSubstitutionEnabled = false
@@ -112,7 +128,11 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
 
         super.init(window: window)
 
+        openSpan = OpenSignposts.signposter.beginInterval("open")
+
+        let setTextStart = DispatchTime.now()
         editorTextView.string = document.text
+        setTextDurationMS = Self.elapsedMS(since: setTextStart)
         editorTextView.undoManager?.removeAllActions()
         editorTextView.delegate = self
         editorTextView.onMouseMoved = { [weak self] point in
@@ -121,7 +141,12 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         editorTextView.diagnosticMessageProvider = { [weak self] index in
             self?.diagnosticMessage(atUTF16Offset: index)
         }
-        highlightAll()
+        editorTextView.onFirstContentPaint = { [weak self] in
+            self?.recordFirstContentPaint()
+        }
+        let highlightStart = DispatchTime.now()
+        applyOpenHighlight()
+        highlightDurationMS = Self.elapsedMS(since: highlightStart)
         // Set last: the highlighter's own attribute writes must not be observed
         // as edits, and the initial full highlight is not a user edit.
         textStorage.delegate = self
@@ -170,16 +195,18 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         isApplyingDocumentText = true
         textView.string = newText
         textView.undoManager?.removeAllActions()
-        highlightAll()
+        applyOpenHighlight()
         isApplyingDocumentText = false
         clearDiagnostics()
     }
 
     // MARK: - Highlighting (ARCHITECTURE.md 5.4)
 
-    private func highlightAll() {
+    /// Highlight via the size-aware open path: synchronous for small documents,
+    /// progressive (interactive-first) for large ones (issue #38).
+    private func applyOpenHighlight() {
         isApplyingHighlight = true
-        highlighter.highlightAll(in: textStorage)
+        highlighter.beginOpenHighlight(in: textStorage)
         isApplyingHighlight = false
     }
 
@@ -201,11 +228,37 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         highlighter.applyEdit(in: textStorage, editedRange: editedRange, changeInLength: delta)
         isApplyingHighlight = false
         clearDiagnostics()
+        // Patch the gutter's cached line starts for this edit now; the ruler
+        // consumes the patch when its own NSText.didChangeNotification arrives
+        // later in the same edit cycle.
+        lineNumberRuler.noteCharactersEdited(range: editedRange, delta: delta)
     }
 
     func textDidChange(_ notification: Notification) {
         guard !isApplyingDocumentText, !isApplyingHighlight, let textDocument else { return }
         textDocument.noteTextEdited(textView.string)
+    }
+
+    // MARK: - Open instrumentation (issue #38)
+
+    private static func elapsedMS(since start: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e6
+    }
+
+    /// First paint of this window's content: close the signpost span and, when
+    /// benchmarking, append the marker line the external harness correlates
+    /// against its own clock.
+    private func recordFirstContentPaint() {
+        guard let span = openSpan else { return }
+        OpenSignposts.signposter.endInterval("open", span)
+        openSpan = nil
+        OpenSignposts.writeMarker(
+            paintWallMS: OpenSignposts.wallNowMS(),
+            readMS: textDocument?.readDurationMS ?? 0,
+            setTextMS: setTextDurationMS,
+            highlightMS: highlightDurationMS,
+            path: textDocument?.fileURL?.path ?? "Untitled"
+        )
     }
 
     // MARK: - Diagnostics and hover (ARCHITECTURE.md 5.5, 5.9)
