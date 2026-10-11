@@ -18,8 +18,30 @@ final class EditorTextView: NSTextView {
     /// means no tooltip at that point.
     var diagnosticMessageProvider: ((Int) -> String?)?
 
+    /// Fired once after new content is set and the view has actually painted
+    /// (issue #38): the window controller uses it to close the open signpost
+    /// span and write the benchmark marker, so the harness times real first
+    /// paint rather than window-title changes.
+    var onFirstContentPaint: (() -> Void)?
+
     private var mouseTrackingArea: NSTrackingArea?
     private var toolTipTag: NSView.ToolTipTag?
+    private var hasPaintedCurrentContent = false
+
+    override var string: String {
+        willSet {
+            // New content means the next draw is the one that counts.
+            hasPaintedCurrentContent = false
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if !hasPaintedCurrentContent {
+            hasPaintedCurrentContent = true
+            onFirstContentPaint?()
+        }
+        super.draw(dirtyRect)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
