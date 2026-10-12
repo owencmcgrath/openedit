@@ -228,20 +228,24 @@ final class LineNumberRulerView: NSRulerView {
         }
 
         // Merge the shifted starts and the inserted starts in one linear pass
-        // (both are sorted; duplicates can arise when an inserted start lands
-        // exactly on a kept boundary start at newEnd).
+        // (both are sorted; equal values — e.g. an inserted start landing on a
+        // kept boundary start at newEnd — must collapse to one entry).
         var merged: [Int] = []
         merged.reserveCapacity(shifted.count + inserted.count)
         var a = 0
         var b = 0
         while a < shifted.count || b < inserted.count {
-            if a < shifted.count && (b >= inserted.count || shifted[a] < inserted[b]) {
-                merged.append(shifted[a])
+            let nextShifted = a < shifted.count ? shifted[a] : Int.max
+            let nextInserted = b < inserted.count ? inserted[b] : Int.max
+            if nextShifted < nextInserted {
+                merged.append(nextShifted)
                 a += 1
+            } else if nextInserted < nextShifted {
+                if merged.last != nextInserted { merged.append(nextInserted) }
+                b += 1
             } else {
-                if merged.last != inserted[b] {
-                    merged.append(inserted[b])
-                }
+                if merged.last != nextShifted { merged.append(nextShifted) }
+                a += 1
                 b += 1
             }
         }

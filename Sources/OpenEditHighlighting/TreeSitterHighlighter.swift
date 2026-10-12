@@ -115,6 +115,10 @@ public final class TreeSitterHighlighter {
     /// Parse the full text and highlight all of it, synchronously. The small
     /// document path (and the shape the unit tests drive directly).
     public func highlightAll(in storage: NSTextStorage) {
+        // A synchronous repaint supersedes any in-flight progressive work: the
+        // generation bump makes a late background result get discarded instead
+        // of overwriting this pass with a stale snapshot.
+        cancelProgressiveWork()
         guard configuration != nil else { return }
 
         let text = storage.string
@@ -181,38 +185,47 @@ public final class TreeSitterHighlighter {
         if let tree, let highlights = configuration.queries[.highlights] {
             let cursor = highlights.execute(in: tree)
             let namedRanges = cursor.resolve(with: .init(string: text)).highlights()
-            var collected: [(NSRange, NSColor)] = []
+            var collected: [(NSRange, NSColor, Int)] = []
             // Cap protects against pathological documents flooding memory;
             // the remainder simply stays uncolored until a later pass.
             let captureCap = 4_000_000
-            for namedRange in namedRanges where collected.count < captureCap {
+            for (order, namedRange) in namedRanges.enumerated() where collected.count < captureCap {
                 if let color = theme.color(forCapture: namedRange.name) {
-                    collected.append((namedRange.range, color))
+                    collected.append((namedRange.range, color, order))
                 }
             }
-            // Query matches arrive grouped by pattern, not position; sort so
-            // bucketing is positional.
-            collected.sort { $0.0.location < $1.0.location }
-            chunks = Self.bucket(collected)
+            // Query matches arrive grouped by pattern, not position; sort by
+            // offset so bucketing is positional, keeping the pattern order
+            // (less specific first) as the tie-break for equal offsets.
+            collected.sort {
+                $0.0.location == $1.0.location ? $0.2 < $1.2 : $0.0.location < $1.0.location
+            }
+            chunks = Self.bucket(collected.map { ($0.0, $0.1) })
         }
+        // The tree is created here and never touched again by this thread; the
+        // main actor takes sole ownership on handoff.
         return FlightResult(tree: tree, text: text, chunks: chunks)
     }
 
-    /// Bucket sorted captures into `chunkUTF16Length` application units.
+    /// Bucket sorted captures into fixed `chunkUTF16Length` windows by the
+    /// capture's start offset (each chunk is one main-queue turn, so this must
+    /// not split per token).
     private nonisolated static func bucket(
         _ captures: [(NSRange, NSColor)]
     ) -> [[(NSRange, NSColor)]] {
-        var chunks: [[(NSRange, NSColor)]] = []
-        var current: [(NSRange, NSColor)] = []
-        var currentEnd = 0
+        guard !captures.isEmpty else { return [] }
         let chunkUTF16Length = 524_288
-        for (range, color) in captures {
-            if !current.isEmpty, range.location >= currentEnd {
-                chunks.append(current)
+        var chunks: [[(NSRange, NSColor)]] = []
+        var currentChunkIndex = -1
+        var current: [(NSRange, NSColor)] = []
+        for capture in captures {
+            let index = capture.0.location / chunkUTF16Length
+            if index != currentChunkIndex {
+                if !current.isEmpty { chunks.append(current) }
                 current = []
+                currentChunkIndex = index
             }
-            current.append((range, color))
-            currentEnd = max(currentEnd, NSMaxRange(range))
+            current.append(capture)
         }
         if !current.isEmpty { chunks.append(current) }
         return chunks
@@ -225,6 +238,16 @@ public final class TreeSitterHighlighter {
         let chunks: [[(NSRange, NSColor)]]
     }
 
+    /// Abort any in-flight background parse or progressive application and
+    /// invalidate results still on their way.
+    private func cancelProgressiveWork() {
+        generation += 1
+        flightActive = false
+        applicationGeneration = nil
+        applicationChunks = []
+        applicationIndex = 0
+    }
+
     private func progressiveFlightCompleted(
         generation gen: Int,
         result: FlightResult,
@@ -232,9 +255,14 @@ public final class TreeSitterHighlighter {
     ) {
         flightActive = false
         guard gen == generation else {
-            // The document changed during the parse; re-enqueue against the
-            // current text so colors eventually match what is on screen.
-            beginProgressiveHighlight(storage: storage, text: storage.string)
+            // The document changed during the parse. Re-enqueue against the
+            // current text so colors eventually match what is on screen — but
+            // only if it is still large enough to need the progressive path (a
+            // reload to a small document already got a synchronous repaint).
+            let currentText = storage.string
+            if (currentText as NSString).length > Self.syncHighlightThreshold {
+                beginProgressiveHighlight(storage: storage, text: currentText)
+            }
             return
         }
         tree = result.tree
