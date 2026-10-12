@@ -119,6 +119,11 @@ for editor in "${editor_list[@]}"; do
         runs="$(runs_for_size "$lines")"
         timeout="$(timeout_for_size "$lines")"
 
+        # Warm the page cache so every editor/size cell starts in the same
+        # cache state (same rationale as bench-gui.sh's prewarm).
+        cat "$file" > /dev/null 2>&1 || true
+        sleep 0.5
+
         if [[ "$MODE" == "tty" || "$MODE" == "both" ]]; then
             if [[ "$needs_ctty" == 1 ]]; then
                 launcher=(/usr/bin/script -q /dev/null "$bin")

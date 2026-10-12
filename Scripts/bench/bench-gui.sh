@@ -27,18 +27,22 @@ DOWNLOADS="${TMPDIR:-/tmp}/openedit-bench-downloads"
 mkdir -p "$RESULTS" "$TOOLCACHE" "$DOWNLOADS"
 
 VARIANT="fixed"
+EXT="txt"
 SIZES="100,1000,10000,100000,1000000"
 EDITORS="openedit,textedit,vscode,zed,sublime,codeedit,nova,bbedit"
 MODE="both"
 RUNS=""
+PREWARM=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --variant) VARIANT="$2"; shift 2 ;;
+        --ext) EXT="$2"; shift 2 ;;
         --sizes) SIZES="$2"; shift 2 ;;
         --editors) EDITORS="$2"; shift 2 ;;
         --mode) MODE="$2"; shift 2 ;;
         --runs) RUNS="$2"; shift 2 ;;
+        --no-prewarm) PREWARM=0; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -153,12 +157,24 @@ for editor in "${editor_list[@]}"; do
         # Per-run corpus copies with unique suffixes.
         copies=()
         for k in $(seq 1 "$runs"); do
-            src="$CORPUS/$VARIANT-${lines}lines.txt"
-            dst="$CORPUS/$VARIANT-${lines}lines-run$k.txt"
+            src="$CORPUS/$VARIANT-${lines}lines.$EXT"
+            dst="$CORPUS/$VARIANT-${lines}lines-run$k.$EXT"
             [[ -e "$dst" ]] || cp "$src" "$dst"
             copies+=("$dst")
         done
-        file_template="$CORPUS/$VARIANT-${lines}lines-run%RUN%.txt"
+        file_template="$CORPUS/$VARIANT-${lines}lines-run%RUN%.$EXT"
+
+        # Warm the page cache for every copy so this cell starts in the same
+        # cache state regardless of what the previous editor's cell evicted —
+        # without this, cell order (and file size) skews results through
+        # first-touch read costs and writeback competition (issue #38 marker
+        # data: an 8 MB read cost 34-269 ms cold-copy vs 11-16 ms cached).
+        if (( PREWARM )); then
+            for copy in "${copies[@]}" "$DECOY"; do
+                cat "$copy" > /dev/null 2>&1 || true
+            done
+            sleep 1 # let writeback of the prewarm reads settle
+        fi
 
         for mode in cold warm; do
             [[ "$MODE" == "both" || "$MODE" == "$mode" ]] || continue
