@@ -104,16 +104,21 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
-    /// Drop the cached line starts so the next draw recomputes them from the
-    /// text view's current content. The window controller calls this on every
-    /// character edit — user keystrokes through its `NSTextStorage` delegate,
-    /// programmatic replacement (initial load, watcher reload, 5.3) directly —
-    /// because the ruler cannot observe those changes itself: setting
-    /// `NSTextView.string` posts no `NSText.didChangeNotification`, and
-    /// `NSTextStorage.didProcessEditingNotification` carries no edit mask to
-    /// separate character edits from the highlighter's attribute writes (5.4).
-    /// Dropping the cache here instead of waiting for the next draw also keeps
-    /// the digit-count width correct before anything scrolls.
+    /// Drop the cached line starts and rescan them from the text view's
+    /// current content: `updateThickness()` below runs `ensureLineStarts()`
+    /// synchronously, so the digit-count width is correct before anything
+    /// draws (only if the text view has no font yet does the rescan defer to
+    /// the next draw's `ensureLineStarts()`). The window controller calls
+    /// this on every character edit — user keystrokes through its
+    /// `NSTextStorage` delegate, programmatic replacement (initial load,
+    /// watcher reload, 5.3) directly — because setting `NSTextView.string`
+    /// posts no `NSText.didChangeNotification`. The ruler could observe the
+    /// storage-level notification such a replacement does post
+    /// (`NSTextStorage.didProcessEditingNotification`) instead — the
+    /// highlighter's attribute-only rounds (5.4) would then trigger only a
+    /// redundant re-invalidation, never a wrong number — but the controller's
+    /// delegate hook sees the edit mask, so invalidation stays scoped to real
+    /// character edits. That is a cost choice, not a hard requirement.
     func invalidate() {
         lineStartsValid = false
         updateThickness()
@@ -188,9 +193,11 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     /// 1-based line number containing `characterIndex`, via binary search over
-    /// the cached line starts. Internal so the windowing regression tests (#37)
-    /// can assert the numbering a draw would produce.
+    /// the cached line starts (recomputed first if stale, so the cache can
+    /// never leak). Internal so the windowing regression tests (#37) can
+    /// assert the numbering a draw would produce.
     func lineNumber(forCharacterIndex characterIndex: Int) -> Int {
+        ensureLineStarts()
         var low = 0
         var high = lineStarts.count - 1
         while low < high {

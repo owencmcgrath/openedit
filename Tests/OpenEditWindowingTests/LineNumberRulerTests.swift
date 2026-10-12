@@ -2,7 +2,6 @@ import AppKit
 import Testing
 
 @testable import OpenEdit
-@testable import OpenEditWindowing
 
 /// Regression tests for #37: the gutter's cached line starts were computed at
 /// `LineNumberRulerView.init` while the text view was still empty, and a
@@ -20,7 +19,13 @@ import Testing
         #expect(ruler.lineNumber(forCharacterIndex: 0) == 1)
         #expect(ruler.lineNumber(forCharacterIndex: Self.startOfLine(1, in: text)) == 2)
         #expect(ruler.lineNumber(forCharacterIndex: Self.startOfLine(lineCount - 1, in: text)) == lineCount)
-        #expect(abs(ruler.ruleThickness - Self.expectedThickness(lineCount: lineCount, font: Self.editorFont)) < 0.5)
+
+        // Width as an observable delta: the 150-line gutter is exactly one
+        // digit wider than a 3-line one (both thicknesses come out of
+        // `updateThickness()`, so ±1 covers its ceil rounding). A stale cache
+        // would leave the two widths equal and fail this.
+        let baseline = try Self.ruler(of: DocumentWindowController(document: try Self.document(withText: Self.text(lineCount: 3))))
+        #expect(abs(ruler.ruleThickness - baseline.ruleThickness - Self.digitAdvance) < 1)
     }
 
     @Test func gutterRecomputesAfterWatcherReload() throws {
@@ -31,13 +36,17 @@ import Testing
         let ruler = try Self.ruler(of: controller)
 
         #expect(ruler.lineNumber(forCharacterIndex: Self.startOfLine(2, in: Self.text(lineCount: 3))) == 3)
+        let thicknessBeforeReload = ruler.ruleThickness
 
         // The disk-reload path (TextDocument.applyText → controller.applyText)
         // replaces the text programmatically, exactly like the initial load.
         controller.applyText(reloadedText)
 
         #expect(ruler.lineNumber(forCharacterIndex: Self.startOfLine(reloadedLineCount - 1, in: reloadedText)) == reloadedLineCount)
-        #expect(abs(ruler.ruleThickness - Self.expectedThickness(lineCount: reloadedLineCount, font: Self.editorFont)) < 0.5)
+        // Same observable delta as the open test: reloading a 150-line
+        // document over a 3-line one widens the gutter by one digit; a stale
+        // cache would keep it unchanged.
+        #expect(abs(ruler.ruleThickness - thicknessBeforeReload - Self.digitAdvance) < 1)
     }
 
     @Test func gutterStaysCorrectAfterUserEdit() throws {
@@ -91,11 +100,10 @@ import Testing
         return location
     }
 
-    /// `LineNumberRulerView.updateThickness()`'s formula: a sample of `8`s as
-    /// wide as the widest line count, plus the 6pt padding on both sides.
-    static func expectedThickness(lineCount: Int, font: NSFont) -> CGFloat {
-        let digits = max(2, String(lineCount).count)
-        let sample = String(repeating: "8", count: digits) as NSString
-        return ceil(sample.size(withAttributes: [.font: font]).width) + 6 * 2
+    /// Advance of one digit at the editor font — the baseline the width
+    /// deltas assert against, without re-deriving `updateThickness()`'s
+    /// padding/sample formula here.
+    static var digitAdvance: CGFloat {
+        ("8" as NSString).size(withAttributes: [.font: editorFont]).width
     }
 }
