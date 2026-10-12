@@ -22,12 +22,6 @@ final class LineNumberRulerView: NSRulerView {
 
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(textDidChange),
-            name: NSText.didChangeNotification,
-            object: textView
-        )
-        NotificationCenter.default.addObserver(
-            self,
             selector: #selector(setNeedsRedraw),
             name: NSTextView.didChangeSelectionNotification,
             object: textView
@@ -110,7 +104,22 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
-    @objc private func textDidChange() {
+    /// Drop the cached line starts and rescan them from the text view's
+    /// current content: `updateThickness()` below runs `ensureLineStarts()`
+    /// synchronously, so the digit-count width is correct before anything
+    /// draws (only if the text view has no font yet does the rescan defer to
+    /// the next draw's `ensureLineStarts()`). The window controller calls
+    /// this on every character edit — user keystrokes through its
+    /// `NSTextStorage` delegate, programmatic replacement (initial load,
+    /// watcher reload, 5.3) directly — because setting `NSTextView.string`
+    /// posts no `NSText.didChangeNotification`. The ruler could observe the
+    /// storage-level notification such a replacement does post
+    /// (`NSTextStorage.didProcessEditingNotification`) instead — the
+    /// highlighter's attribute-only rounds (5.4) would then trigger only a
+    /// redundant re-invalidation, never a wrong number — but the controller's
+    /// delegate hook sees the edit mask, so invalidation stays scoped to real
+    /// character edits. That is a cost choice, not a hard requirement.
+    func invalidate() {
         lineStartsValid = false
         updateThickness()
         needsDisplay = true
@@ -184,8 +193,11 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     /// 1-based line number containing `characterIndex`, via binary search over
-    /// the cached line starts.
-    private func lineNumber(forCharacterIndex characterIndex: Int) -> Int {
+    /// the cached line starts (recomputed first if stale, so the cache can
+    /// never leak). Internal so the windowing regression tests (#37) can
+    /// assert the numbering a draw would produce.
+    func lineNumber(forCharacterIndex characterIndex: Int) -> Int {
+        ensureLineStarts()
         var low = 0
         var high = lineStarts.count - 1
         while low < high {

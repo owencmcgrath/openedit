@@ -140,9 +140,13 @@ let package = Package(
             dependencies: ["OpenEditLSP", "OpenEditConfig"],
             path: "Tests/OpenEditLSPTests"
         ),
+        // `OpenEditWindowingTests` also covers the app shell's window
+        // components (the #37 gutter regression tests import the `OpenEdit`
+        // executable module with `@testable`), so the app target is a
+        // dependency of this test target.
         .testTarget(
             name: "OpenEditWindowingTests",
-            dependencies: ["OpenEditWindowing"],
+            dependencies: ["OpenEditWindowing", "OpenEdit"],
             path: "Tests/OpenEditWindowingTests"
         )    ]
 )

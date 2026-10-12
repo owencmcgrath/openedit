@@ -113,6 +113,10 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         super.init(window: window)
 
         editorTextView.string = document.text
+        // Setting `string` programmatically posts no text-change notification
+        // the ruler observes (see LineNumberRulerView.invalidate()), so drop
+        // the cache that init computed against the empty view.
+        lineNumberRuler.invalidate()
         editorTextView.undoManager?.removeAllActions()
         editorTextView.delegate = self
         editorTextView.onMouseMoved = { [weak self] point in
@@ -169,6 +173,9 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
     func applyText(_ newText: String) {
         isApplyingDocumentText = true
         textView.string = newText
+        // Same notification gap as the initial load: invalidate explicitly
+        // rather than waiting for a keystroke to fix the numbering.
+        lineNumberRuler.invalidate()
         textView.undoManager?.removeAllActions()
         highlightAll()
         isApplyingDocumentText = false
@@ -197,6 +204,10 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
               !isApplyingHighlight
         else { return }
 
+        // Every user edit invalidates the gutter's cached line starts before
+        // the highlighter runs, so the numbering and digit width track the new
+        // text even if nothing else redraws (see LineNumberRulerView.invalidate()).
+        lineNumberRuler.invalidate()
         isApplyingHighlight = true
         highlighter.applyEdit(in: textStorage, editedRange: editedRange, changeInLength: delta)
         isApplyingHighlight = false
