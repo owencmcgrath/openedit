@@ -135,7 +135,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // arriving later (Open Documents Apple Events, slow mounts) settle the
         // launch-created Untitled themselves via
         // TextDocument.settleLaunchedUntitledDocuments().
-        NSApp.activate(ignoringOtherApps: true)
+        // Only claim focus when launched foreground (plain `open`, Finder,
+        // Dock). A background launch (`open -g -a`, used by the benchmark
+        // harness) must not steal the user's focus — the odoc window still
+        // orders front within our own app.
+        if NSApp.isActive || !hasDocumentTypes {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     /// Backstop for the Untitled fallback in case activation is delayed; the

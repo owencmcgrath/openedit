@@ -33,6 +33,8 @@ EDITORS="openedit,textedit,vscode,zed,sublime,codeedit,nova,bbedit"
 MODE="both"
 RUNS=""
 PREWARM=1
+BACKGROUND=0
+HIDDEN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,6 +45,8 @@ while [[ $# -gt 0 ]]; do
         --mode) MODE="$2"; shift 2 ;;
         --runs) RUNS="$2"; shift 2 ;;
         --no-prewarm) PREWARM=0; shift ;;
+        --background) BACKGROUND=1; PRESERVE=1; shift ;;
+        --hidden) HIDDEN=1; BACKGROUND=1; PRESERVE=1; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -109,6 +113,7 @@ editor_spec() {
         openedit) echo "com.openedit.app|open -a '$ROOT/build/OpenEdit.app' %FILE%|" ;;
         textedit) echo "com.apple.TextEdit|open -a TextEdit %FILE%|" ;;
         vscode)   echo "com.microsoft.VSCode|rm -f '$VSCODE_PROFILE'/1.*-main.sock 2>/dev/null; $(vscode_open)|prepare_vscode" ;;
+        vscode-bg) echo "com.microsoft.VSCode|rm -f '$VSCODE_PROFILE'/1.*-main.sock 2>/dev/null; open -g -a '/Applications/Visual Studio Code.app' --args --user-data-dir '$VSCODE_PROFILE' --disable-extensions %FILE%|prepare_vscode" ;;
         zed)      echo "dev.zed.Zed|open -a '$HOME/Applications/Zed.app' %FILE%|" ;;
         sublime)  echo "com.sublimetext.4|open -a '$HOME/Applications/Sublime Text.app' %FILE%|" ;;
         codeedit) echo "app.codeedit.CodeEdit|open -a '$HOME/Applications/CodeEdit.app' %FILE%|" ;;
@@ -122,6 +127,7 @@ IFS=',' read -r -a editor_list <<< "$EDITORS"
 IFS=',' read -r -a size_list <<< "$SIZES"
 
 for editor in "${editor_list[@]}"; do
+    [[ "$BACKGROUND" == 1 && "$editor" == "vscode" ]] && editor="vscode-bg"
     spec="$(editor_spec "$editor" || true)"
     if [[ -z "$spec" ]]; then echo "skip unknown editor $editor" >&2; continue; fi
     IFS='|' read -r -a parts <<< "$spec"
@@ -136,6 +142,16 @@ for editor in "${editor_list[@]}"; do
     if [[ -n "$app_dir" && ! -d "$app_dir" ]]; then
         echo "skip $editor: $app_dir not installed" >&2
         continue
+    fi
+    # Background/hidden mode: windows appear (background) or not at all
+    # (hidden), and focus never moves. Applicable to every open -a based
+    # launcher; the vscode CLI path swaps to open --args.
+    if [[ "$BACKGROUND" == 1 && "$editor" != "vscode" ]]; then
+        if [[ "$HIDDEN" == 1 ]]; then
+            template=${template/open -a /open -j -a }
+        else
+            template=${template/open -a /open -g -a }
+        fi
     fi
     [[ -n "$prepare" ]] && $prepare
 
@@ -183,7 +199,7 @@ for editor in "${editor_list[@]}"; do
             out=$("$TOOLCACHE/guibench" \
                 --file "$file_template" \
                 --mode "$mode" --runs "$runs" --timeout-sec "$timeout" \
-                --bundle-id "$bundle" ${extra[@]+"${extra[@]}"} \
+                --bundle-id "$bundle" ${extra[@]+"${extra[@]}"} ${PRESERVE:+--preserve-focus} \
                 -- "$(printf '%s' "$template")" 2>&1) || true
             parsed=$(printf '%s\n' "$out" | awk -F= '{v[$1]=$2}END{printf "%s %s %s %s %s %s", v["median"],v["p90"],v["min"],v["max"],v["ok"],v["failed"]}')
             read -r median p90 mn mx ok failed <<< "$parsed"

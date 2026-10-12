@@ -32,6 +32,7 @@ var runs = 5
 var timeoutSec = 180.0
 var bundleID = ""
 var decoy = ""
+var preserveFocus = false
 var openCommand = ""
 
 var it = CommandLine.arguments.dropFirst().makeIterator()
@@ -43,6 +44,7 @@ while let arg = it.next() {
     case "--timeout-sec": timeoutSec = Double(it.next() ?? "180") ?? 180
     case "--bundle-id": bundleID = it.next() ?? ""
     case "--decoy": decoy = it.next() ?? ""
+    case "--preserve-focus": preserveFocus = true
     case "--":
         // Everything after -- is the command. Two call styles are supported:
         // a single pre-quoted shell template token (drivers pass one), or
@@ -152,6 +154,29 @@ func runShell(_ command: String) {
     }
 }
 
+/// Some editors (Electron apps) self-activate on launch even under
+/// `open -j/-g`. When preserving focus, remember the frontmost app before an
+/// open and hand focus back if it moved — the benchmark stays measurable while
+/// the user's typing is never hijacked.
+func runOpenPreservingFocus(_ command: String) {
+    let previous = NSWorkspace.shared.frontmostApplication
+    runShell(command)
+    guard preserveFocus, let previous, let previousID = previous.bundleIdentifier else { return }
+    usleep(1_500_000)
+    if let current = NSWorkspace.shared.frontmostApplication,
+       current.processIdentifier != previous.processIdentifier {
+        // Restore focus via /usr/bin/open -b: NSApplication-dependent
+        // activation from this bare CLI is not available.
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        proc.arguments = ["-b", previousID]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+    }
+}
+
 // MARK: - Accessibility polling
 
 guard AXIsProcessTrusted() else {
@@ -227,7 +252,7 @@ case "cold":
         terminateApp(bundleID: bundleID)
         usleep(300_000) // let WindowServer settle between launches
         let t0 = DispatchTime.now()
-        runShell(openCommand.replacingOccurrences(of: "%FILE%", with: target))
+        runOpenPreservingFocus(openCommand.replacingOccurrences(of: "%FILE%", with: target))
         if let (_, rss, cpu) = waitForTitle(pid: pidForBundleID(bundleID) ?? 0, needle: needle, timeout: timeoutSec) {
             samples.append(Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e9)
             rssSamples.append(rss)
@@ -244,7 +269,7 @@ case "warm":
     }
     // Ensure a running instance with some window, so the warm path is real.
     if pidForBundleID(bundleID) == nil {
-        runShell(openCommand.replacingOccurrences(of: "%FILE%", with: decoy))
+        runOpenPreservingFocus(openCommand.replacingOccurrences(of: "%FILE%", with: decoy))
         _ = waitForTitle(pid: 0, needle: (decoy as NSString).lastPathComponent, timeout: timeoutSec)
         usleep(1_000_000)
     }
@@ -253,7 +278,7 @@ case "warm":
         let needle = titleNeedle(forPath: target)
         // Move the title off the target basename with the decoy, then time
         // the real open.
-        runShell(openCommand.replacingOccurrences(of: "%FILE%", with: decoy))
+        runOpenPreservingFocus(openCommand.replacingOccurrences(of: "%FILE%", with: decoy))
         _ = waitForTitle(pid: 0, needle: (decoy as NSString).lastPathComponent, timeout: timeoutSec)
         usleep(400_000)
         // Baseline CPU before the open; the cell reports the delta the open
@@ -265,7 +290,7 @@ case "warm":
         }
         let command = openCommand.replacingOccurrences(of: "%FILE%", with: target)
         let t0 = DispatchTime.now()
-        runShell(command)
+        runOpenPreservingFocus(command)
         if let (_, _, cpuAfter) = waitForTitle(pid: 0, needle: needle, timeout: timeoutSec) {
             samples.append(Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e9)
             rssSamples.append(0) // cumulative instance RSS is not per-cell meaningful when warm
