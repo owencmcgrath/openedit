@@ -11,8 +11,14 @@ final class LineNumberRulerView: NSRulerView {
     /// entry for the empty line that follows a final newline. Cached so a
     /// redraw is O(log n) instead of rescanning the whole document from
     /// index 0 on every caret blink.
+    ///
+    /// Built by a single pass over a unichar buffer (issue #38: the previous
+    /// per-line `lineRange(for:)` walk cost seconds on million-line files),
+    /// and patched incrementally on edits via `noteCharactersEdited` so a
+    /// keystroke never rescans the document.
     private var lineStarts: [Int] = [0]
     private var lineStartsValid = false
+    private var patchPendingForCurrentNotification = false
 
     init(textView: NSTextView, scrollView: NSScrollView) {
         self.textView = textView
@@ -111,7 +117,13 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     @objc private func textDidChange() {
-        lineStartsValid = false
+        if patchPendingForCurrentNotification {
+            // The incremental patch in noteCharactersEdited already updated
+            // lineStarts for this edit; a rescan here would erase the win.
+            patchPendingForCurrentNotification = false
+        } else {
+            lineStartsValid = false
+        }
         updateThickness()
         needsDisplay = true
     }
@@ -166,21 +178,117 @@ final class LineNumberRulerView: NSRulerView {
         lineStartsValid = true
     }
 
-    /// Character offsets where each logical line begins. A final newline adds
-    /// an entry at `string.length` for the empty line after it.
-    private static func computeLineStarts(in string: NSString) -> [Int] {
-        var starts = [0]
-        var location = 0
-        while location < string.length {
-            let next = NSMaxRange(string.lineRange(for: NSRange(location: location, length: 0)))
-            if next <= location { break }
-            location = next
-            if location < string.length { starts.append(location) }
+    /// Patch the cached line starts for one character edit (called from the
+    /// window controller's `NSTextStorageDelegate` before the ruler's own
+    /// `NSText.didChangeNotification` arrives). O(edited region), not O(doc).
+    ///
+    /// `range` is the edited range in the *new* text and `delta` is
+    /// `newLength - oldLength`, exactly what `didProcessEditing` reports.
+    func noteCharactersEdited(range: NSRange, delta: Int) {
+        guard lineStartsValid, let textView else { return }
+
+        let string = textView.string as NSString
+        let documentLength = string.length
+        let loc = max(0, min(range.location, documentLength))
+        let newEnd = max(loc, min(NSMaxRange(range), documentLength))
+        let oldEnd = max(loc, newEnd - delta)
+
+        // Keep starts at or before the edit, drop starts strictly inside the
+        // replaced region, and shift everything from the old region's end
+        // (a start exactly at oldEnd is the line after the edit — kept).
+        var shifted: [Int] = []
+        shifted.reserveCapacity(lineStarts.count)
+        var i = 0
+        while i < lineStarts.count && lineStarts[i] <= loc {
+            shifted.append(lineStarts[i])
+            i += 1
         }
-        if string.length > 0, isNewline(at: string.length - 1, in: string) {
-            starts.append(string.length)
+        while i < lineStarts.count && lineStarts[i] < oldEnd {
+            i += 1
+        }
+        while i < lineStarts.count {
+            shifted.append(lineStarts[i] + delta)
+            i += 1
+        }
+
+        // New line starts inside the edited region, in new-text coordinates.
+        var inserted: [Int] = []
+        if newEnd > loc {
+            var j = loc
+            while j < newEnd {
+                let c = string.character(at: j)
+                // \r\n counts once, at the \n; every other newline unit
+                // starts a line at j+1.
+                let isRNLead = c == 0x0D && j + 1 < newEnd && string.character(at: j + 1) == 0x0A
+                if Self.isNewlineCodeUnit(c), !isRNLead, j + 1 <= documentLength {
+                    inserted.append(j + 1)
+                }
+                j += 1
+            }
+        }
+
+        // Merge the shifted starts and the inserted starts in one linear pass
+        // (both are sorted; equal values — e.g. an inserted start landing on a
+        // kept boundary start at newEnd — must collapse to one entry).
+        var merged: [Int] = []
+        merged.reserveCapacity(shifted.count + inserted.count)
+        var a = 0
+        var b = 0
+        while a < shifted.count || b < inserted.count {
+            let nextShifted = a < shifted.count ? shifted[a] : Int.max
+            let nextInserted = b < inserted.count ? inserted[b] : Int.max
+            if nextShifted < nextInserted {
+                merged.append(nextShifted)
+                a += 1
+            } else if nextInserted < nextShifted {
+                if merged.last != nextInserted { merged.append(nextInserted) }
+                b += 1
+            } else {
+                if merged.last != nextShifted { merged.append(nextShifted) }
+                a += 1
+                b += 1
+            }
+        }
+        lineStarts = merged
+        patchPendingForCurrentNotification = true
+    }
+
+    /// Character offsets where each logical line begins, via one pass over a
+    /// unichar buffer. A final newline adds an entry at `string.length` for
+    /// the empty line after it. The old per-line `lineRange(for:)` walk made
+    /// million-line opens pay millions of ObjC bridge calls; this is a single
+    /// linear scan (issue #38).
+    private static func computeLineStarts(in string: NSString) -> [Int] {
+        let length = string.length
+        guard length > 0 else { return [0] }
+
+        var buffer = [unichar](repeating: 0, count: length)
+        string.getCharacters(&buffer, range: NSRange(location: 0, length: length))
+
+        var starts: [Int] = [0]
+        starts.reserveCapacity(max(16, length / 60 + 2))
+        var i = 0
+        while i < length {
+            let c = buffer[i]
+            if isNewlineCodeUnit(c) {
+                // \r\n counts once, at the \n.
+                let isRNLead = c == 0x0D && i + 1 < length && buffer[i + 1] == 0x0A
+                if !isRNLead, i + 1 < length {
+                    starts.append(i + 1)
+                }
+            }
+            i += 1
+        }
+        if isNewlineCodeUnit(buffer[length - 1]) {
+            starts.append(length)
         }
         return starts
+    }
+
+    /// Same newline set `NSString.lineRange` treats as breaks, as code units.
+    private static func isNewlineCodeUnit(_ c: unichar) -> Bool {
+        c == 0x0A || c == 0x0B || c == 0x0C || c == 0x0D
+            || c == 0x85 || c == 0x2028 || c == 0x2029
     }
 
     /// 1-based line number containing `characterIndex`, via binary search over

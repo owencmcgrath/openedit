@@ -46,6 +46,10 @@ final class TextDocument: NSDocument {
     private var watcher: FileChangeWatcher?
     private var lastKnownFileStat: FileStat?
 
+    /// Wall-clock cost of getting `text` from disk (issue #38 instrumentation:
+    /// reported in the first-paint benchmark marker).
+    private(set) var readDurationMS: Double = 0
+
     /// The app only ever reads and writes plain text; set the type directly so
     /// NSDocument's save machinery has a writable type without consulting an
     /// Info.plist type table (which the bare `swift run` executable lacks).
@@ -53,11 +57,14 @@ final class TextDocument: NSDocument {
         self.init()
         fileURL = url
         fileType = Self.fileTypeIdentifier
+        let start = DispatchTime.now()
         let data = try Data(contentsOf: url)
         try read(from: data, ofType: Self.fileTypeIdentifier)
+        readDurationMS = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e6
     }
 
     override func read(from data: Data, ofType typeName: String) throws {
+        let start = DispatchTime.now()
         guard let newText = Self.decode(data) else {
             throw CocoaError(
                 .fileReadCorruptFile,
@@ -65,6 +72,10 @@ final class TextDocument: NSDocument {
             )
         }
         text = newText
+        // The NSDocumentController read path performs the Data(contentsOf:)
+        // step itself, so this measures decode only there; the convenience
+        // init overwrites it with read+decode for the manual path.
+        readDurationMS = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e6
         refreshWatchState()
     }
 
