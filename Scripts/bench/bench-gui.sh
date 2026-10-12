@@ -108,12 +108,12 @@ editor_spec() {
     case "$1" in
         openedit) echo "com.openedit.app|open -a '$ROOT/build/OpenEdit.app' %FILE%|" ;;
         textedit) echo "com.apple.TextEdit|open -a TextEdit %FILE%|" ;;
-        vscode)   echo "com.microsoft.VSCode|$(vscode_open)|prepare_vscode" ;;
+        vscode)   echo "com.microsoft.VSCode|rm -f '$VSCODE_PROFILE'/1.*-main.sock 2>/dev/null; $(vscode_open)|prepare_vscode" ;;
         zed)      echo "dev.zed.Zed|open -a '$HOME/Applications/Zed.app' %FILE%|" ;;
         sublime)  echo "com.sublimetext.4|open -a '$HOME/Applications/Sublime Text.app' %FILE%|" ;;
-        codeedit) echo "com.codeeditapp.CodeEdit|open -a '$HOME/Applications/CodeEdit.app' %FILE%|" ;;
-        nova)     echo "com.panic.Nova|open -a Nova %FILE%|" ;;
-        bbedit)   echo "com.barebones.bbedit|open -a BBEdit %FILE%|" ;;
+        codeedit) echo "app.codeedit.CodeEdit|open -a '$HOME/Applications/CodeEdit.app' %FILE%|" ;;
+        nova)     echo "com.panic.Nova|open -a '$HOME/Applications/Nova.app' %FILE%|" ;;
+        bbedit)   echo "com.barebones.bbedit|open -a '$HOME/Applications/BBEdit.app' %FILE%|" ;;
         *) return 1 ;;
     esac
 }
@@ -192,7 +192,12 @@ for editor in "${editor_list[@]}"; do
                 printf '%s\n' "$out" | head -3 >&2
                 median="DNF"; p90="DNF"; mn="DNF"; mx="DNF"; ok=0
             fi
-            record "$editor" "$VARIANT" "$lines" "$mode" "$median" "$p90" "$mn" "$mx" "$ok" "$failed"
+            # The variant column must distinguish corpus extensions, otherwise
+            # an --ext py pass silently overwrites the .txt rows under the
+            # report's last-row-wins rule.
+            variant_label="$VARIANT"
+            [[ "$EXT" != "txt" ]] && variant_label="$VARIANT.$EXT"
+            record "$editor" "$variant_label" "$lines" "$mode" "$median" "$p90" "$mn" "$mx" "$ok" "$failed"
         done
     done
 done
