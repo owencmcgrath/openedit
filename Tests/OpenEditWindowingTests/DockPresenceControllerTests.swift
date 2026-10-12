@@ -66,20 +66,40 @@ import Testing
         ))
     }
 
-    @Test func unchangedPolicyNeverYields() {
+    @Test func unchangedRegularPolicyNeverYields() {
         // Recomputes that do not change the policy (another window's
-        // key/main notifications) are no-ops and must not hide the app.
+        // key/main notifications) are no-ops and must not touch focus.
         #expect(!DockPresenceController.shouldYieldActivation(
             from: .regular,
             to: .regular,
             isActive: true,
             hasWindows: false
         ))
-        #expect(!DockPresenceController.shouldYieldActivation(
+    }
+
+    @Test func lateCloseAfterVetoedCloseStillYields() {
+        // The late hand-off (#39 review): a close that was vetoed by a
+        // remaining window (Settings, a transient popover) drops the policy to
+        // .accessory while that window is still up. When that last window
+        // itself closes, the policy is already .accessory — this recompute
+        // must still hand focus back, or the app lingers active-but-invisible.
+        #expect(DockPresenceController.shouldYieldActivation(
             from: .accessory,
             to: .accessory,
             isActive: true,
             hasWindows: false
+        ))
+    }
+
+    @Test func lateRecomputeWithRemainingWindowsStillVetoes() {
+        // The remaining-window veto holds for the late hand-off too: as long
+        // as anything is still on screen, hiding would pull it out from under
+        // the user.
+        #expect(!DockPresenceController.shouldYieldActivation(
+            from: .accessory,
+            to: .accessory,
+            isActive: true,
+            hasWindows: true
         ))
     }
 }
