@@ -247,7 +247,7 @@ let median = samples.count % 2 == 1
     ? samples[samples.count / 2]
     : (samples[samples.count / 2 - 1] + samples[samples.count / 2]) / 2
 
-var out = "runs=\(runs) ok=\(samples.count) failed=\(failures)\n"
+var out = "runs=\(runs)\nok=\(samples.count)\nfailed=\(failures)\n"
 out += String(format: "median=%.6f\np90=%.6f\nmin=%.6f\nmax=%.6f\n", median, pct(90), samples.first!, samples.last!)
 out += samples.map { String(format: "sample=%.6f", $0) }.joined(separator: "\n") + "\n"
 FileHandle.standardOutput.write(out.data(using: .utf8)!)

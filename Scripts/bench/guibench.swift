@@ -43,14 +43,13 @@ while let arg = it.next() {
     case "--bundle-id": bundleID = it.next() ?? ""
     case "--decoy": decoy = it.next() ?? ""
     case "--":
-        // Everything after -- is the command. Collect the remaining tokens
-        // (the earlier one-token capture made `open` run argumentless, which
-        // is why every run failed with a usage error).
+        // Everything after -- is the command string, joined verbatim and run
+        // through /bin/sh. (Callers may pass one pre-quoted shell template or
+        // several tokens; either way it must NOT be re-quoted — wrapping a
+        // whole shell line in quotes makes sh treat it as one command name.)
         var tokens: [String] = []
         while let t = it.next() { tokens.append(t) }
-        openCommand = tokens
-            .map { "'\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }
-            .joined(separator: " ")
+        openCommand = tokens.joined(separator: " ")
         break
     default: break
     }
@@ -224,7 +223,7 @@ samples.sort()
 let median = samples.count % 2 == 1
     ? samples[samples.count / 2]
     : (samples[samples.count / 2 - 1] + samples[samples.count / 2]) / 2
-var out = "mode=\(mode) runs=\(runs) ok=\(samples.count) failed=\(failures)\n"
+var out = "mode=\(mode)\nruns=\(runs)\nok=\(samples.count)\nfailed=\(failures)\n"
 out += String(format: "median=%.6f\np90=%.6f\nmin=%.6f\nmax=%.6f\n",
               median,
               samples[min(samples.count - 1, Int((Double(samples.count - 1) * 0.9).rounded()))],

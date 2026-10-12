@@ -135,6 +135,17 @@ for editor in "${editor_list[@]}"; do
     fi
     [[ -n "$prepare" ]] && $prepare
 
+    # First-run dialogs (license agreements, welcome screens) block automated
+    # opens: launch once with a scratch file, press through any modal with
+    # axpress, then quit so the measured runs start clean.
+    if [[ -x "$AXPRESS" && "$editor" != "openedit" ]]; then
+        printf 'OpenEdit benchmark first-run dismissal file.\n' > "$CORPUS/firstrun.txt"
+        sh -c "${template/\%FILE\%/$CORPUS/firstrun.txt}" >/dev/null 2>&1 || true
+        "$AXPRESS" --bundle-id "$bundle" --seconds 12 >/dev/null 2>&1 || true
+        osascript -e "quit app id \"$bundle\"" >/dev/null 2>&1 || true
+        sleep 2
+    fi
+
     for lines in "${size_list[@]}"; do
         runs="$(runs_for_size "$lines")"
         timeout="$(timeout_for_size "$lines")"
@@ -156,10 +167,10 @@ for editor in "${editor_list[@]}"; do
             out=$("$TOOLCACHE/guibench" \
                 --file "$file_template" \
                 --mode "$mode" --runs "$runs" --timeout-sec "$timeout" \
-                --bundle-id "$bundle" "${extra[@]+\"${extra[@]}\"}" \
+                --bundle-id "$bundle" ${extra[@]+"${extra[@]}"} \
                 -- "$(printf '%s' "$template")" 2>&1) || true
-            parsed=$(printf '%s\n' "$out" | awk -F= '/^median=/{m=$2}/^p90=/{p=$2}/^min=/{i=$2}/^max=/{a=$2}/^mode=/{split($2,v," "); ok=v[3]; sub("ok=","",ok)}END{printf "%s %s %s %s %s", m,p,i,a,ok}')
-            read -r median p90 mn mx ok <<< "$parsed"
+            parsed=$(printf '%s\n' "$out" | awk -F= '{v[$1]=$2}END{printf "%s %s %s %s %s %s", v["median"],v["p90"],v["min"],v["max"],v["ok"],v["failed"]}')
+            read -r median p90 mn mx ok failed <<< "$parsed"
             failed=$(( runs - ${ok:-0} ))
             if [[ -z "$median" ]]; then
                 printf '%s\n' "$out" | head -3 >&2

@@ -32,6 +32,7 @@ func appElement() -> AXUIElement? {
 
 func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var value: CFTypeRef?
+    // The AX constants import as Swift Strings; the C API wants CFStringRef.
     guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
     return value
 }
@@ -40,21 +41,24 @@ func press(_ element: AXUIElement) {
     AXUIElementPerformAction(element, kAXPressAction as CFString)
 }
 
-/// Press a window's default button, or any button whose role/title suggests
-/// agreement. Returns whether something was pressed.
+/// Press a window's default button, or any child button whose role/title
+/// suggests agreement. Returns whether something was pressed.
 func tryDismiss(_ window: AXUIElement) -> Bool {
-    if let defaultButton = attribute(window, kAXDefaultButtonAttribute as CFString) {
+    if let defaultButton = attribute(window, kAXDefaultButtonAttribute) {
         press(defaultButton as! AXUIElement)
         return true
     }
-    guard let buttons = attribute(window, kAXButtonAttribute as CFString) as? [AXUIElement] else {
+    guard let children = attribute(window, kAXChildrenAttribute) as? [AXUIElement] else {
         return false
     }
     let agreeing = ["agree", "accept", "continue", "ok", "get started", "start", "later", "not now"]
-    for button in buttons {
-        let title = (attribute(button, kAXTitleAttribute as CFString) as? String)?.lowercased() ?? ""
+    for child in children {
+        guard let role = attribute(child, kAXRoleAttribute) as? String, role == "AXButton" else {
+            continue
+        }
+        let title = (attribute(child, kAXTitleAttribute) as? String)?.lowercased() ?? ""
         if agreeing.contains(where: { title.contains($0) }) {
-            press(button)
+            press(child)
             return true
         }
     }
@@ -65,7 +69,7 @@ let deadline = Date().addingTimeInterval(seconds)
 var pressed = 0
 while Date() < deadline {
     guard let app = appElement(),
-          let windowsRaw = attribute(app, kAXWindowsAttribute as CFString),
+          let windowsRaw = attribute(app, kAXWindowsAttribute),
           let windows = windowsRaw as? [AXUIElement]
     else { usleep(500_000); continue }
     for window in windows where tryDismiss(window) {

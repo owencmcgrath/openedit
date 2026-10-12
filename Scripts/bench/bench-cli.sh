@@ -77,7 +77,7 @@ editor_spec() {
         nvim)  echo "/opt/homebrew/bin/nvim|--clean|\e\;:qa\!\r" ;;
         kak)   echo "/opt/homebrew/bin/kak||\e\;:q\r" ;;
         micro) echo "/opt/homebrew/bin/micro|--clean|\x11" ;;
-        emacs) echo "/opt/homebrew/bin/emacs|-nw -q --no-site-file|\x18\x18" ;;
+        emacs) echo "/opt/homebrew/bin/emacs|-nw -q --no-site-file|\x18\x03" ;;
         *) return 1 ;;
     esac
 }
@@ -107,9 +107,11 @@ for editor in "${editor_list[@]}"; do
             # shellcheck disable=SC2086
             out=$("$TOOLCACHE/ttybench" --file "$file" --runs "$runs" --timeout-sec "$timeout" \
                 --quit "$quit" -- "$bin" $extra_flags "$file" 2>&1) || true
-            parsed=$(printf '%s\n' "$out" | awk -F= '/^median=/{m=$2}/^p90=/{p=$2}/^min=/{i=$2}/^max=/{a=$2}/^runs=/{split($2,v," "); ok=v[2]; sub("ok=","",ok)}END{printf "%s %s %s %s %s", m,p,i,a,ok}')
-            read -r median p90 mn mx ok <<< "$parsed"
-            failed=$(( runs - ${ok:-0} ))
+            parsed=$(printf '%s\n' "$out" | awk -F= '{v[$1]=$2}END{printf "%s %s %s %s %s %s", v["median"],v["p90"],v["min"],v["max"],v["ok"],v["failed"]}')
+            read -r median p90 mn mx ok failed <<< "$parsed"
+            if [[ -z "$median" ]]; then
+                median="DNF"; p90="DNF"; mn="DNF"; mx="DNF"; ok=0; failed="$runs"
+            fi
             record "$editor" "$VARIANT" "$lines" "tty" "$median" "$p90" "$mn" "$mx" "$ok" "$failed"
         fi
 
@@ -129,12 +131,19 @@ for editor in "${editor_list[@]}"; do
                     ;;
             esac
             if command -v hyperfine >/dev/null 2>&1; then
-                stats=$(hyperfine --warmup 2 --min-runs "$runs" --style basic \
-                    --export-json /dev/stdout "$cmd" 2>/dev/null \
-                    | python3 -c 'import json,sys; d=json.load(sys.stdin)["results"][0]; print(f"{d[\"median\"]:.6f} {sorted(d[\"times\"])[int(len(d[\"times\"])*0.9)-1]:.6f} {d[\"min\"]:.6f} {d[\"max\"]:.6f}")') || true
-                if [[ -n "$stats" ]]; then
-                    read -r median p90 mn mx <<< "$stats"
-                    record "$editor" "$VARIANT" "$lines" "quit" "$median" "$p90" "$mn" "$mx" "$runs" 0
+                json="$TOOLCACHE/hyperfine.json"
+                if hyperfine --warmup 2 --min-runs "$runs" --style basic \
+                    --export-json "$json" "$cmd" >/dev/null 2>&1; then
+                    stats=$(python3 -c 'import json,sys,math
+r=json.load(open(sys.argv[1]))["results"][0]
+s=r["summary"]["time_wall_clock"]
+times=sorted(m["time_wall_clock"]["value"] for m in r["measurements"])
+i=max(0,math.ceil(len(times)*0.9)-1)
+print("%.6f %.6f %.6f %.6f" % (s["median"], times[i], s["min"], s["max"]))' "$json") || true
+                    if [[ -n "$stats" ]]; then
+                        read -r median p90 mn mx <<< "$stats"
+                        record "$editor" "$VARIANT" "$lines" "quit" "$median" "$p90" "$mn" "$mx" "$runs" 0
+                    fi
                 fi
             fi
         fi
