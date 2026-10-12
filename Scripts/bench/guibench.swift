@@ -44,13 +44,23 @@ while let arg = it.next() {
     case "--bundle-id": bundleID = it.next() ?? ""
     case "--decoy": decoy = it.next() ?? ""
     case "--":
-        // Everything after -- is the command string, joined verbatim and run
-        // through /bin/sh. (Callers may pass one pre-quoted shell template or
-        // several tokens; either way it must NOT be re-quoted — wrapping a
-        // whole shell line in quotes makes sh treat it as one command name.)
+        // Everything after -- is the command. Two call styles are supported:
+        // a single pre-quoted shell template token (drivers pass one), or
+        // multiple tokens joined with per-token quoting. Never re-quote a
+        // single token (that wraps a whole shell line into one command name)
+        // and never leave an unquoted multi-word path split across tokens.
         var tokens: [String] = []
         while let t = it.next() { tokens.append(t) }
-        openCommand = tokens.joined(separator: " ")
+        if tokens.count == 1 {
+            openCommand = tokens[0]
+        } else {
+            openCommand = tokens.map { token -> String in
+                let needsQuoting = token.isEmpty
+                    || token.contains(where: { " \t\"'\\$`&|;<>()".contains($0) })
+                guard needsQuoting else { return token }
+                return "'\(token.replacingOccurrences(of: "'", with: "'\\''"))'"
+            }.joined(separator: " ")
+        }
         break
     default: break
     }
@@ -77,7 +87,11 @@ func titleNeedle(forPath path: String) -> String {
 // MARK: - App process helpers
 
 func pidForBundleID(_ id: String) -> pid_t? {
-    NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier
+    // Electron apps (VS Code, Zed) have several processes sharing one bundle
+    // identifier; helpers expose no AX windows. Prefer the regular-activation
+    // (dock-facing) process, which is the one that owns windows.
+    let candidates = NSRunningApplication.runningApplications(withBundleIdentifier: id)
+    return (candidates.first { $0.activationPolicy == .regular } ?? candidates.first)?.processIdentifier
 }
 
 /// (current resident bytes, user+system CPU nanoseconds) for `pid`, or nil
