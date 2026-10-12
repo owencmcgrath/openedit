@@ -24,6 +24,7 @@
 import Foundation
 import ApplicationServices
 import AppKit
+import Darwin
 
 var file = ""
 var mode = "cold"
@@ -77,6 +78,26 @@ func titleNeedle(forPath path: String) -> String {
 
 func pidForBundleID(_ id: String) -> pid_t? {
     NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier
+}
+
+/// (current resident bytes, user+system CPU nanoseconds) for `pid`, or nil
+/// when the process is gone. proc_pid_rusage fills a CALLER-ALLOCATED
+/// rusage_info struct (the classic C pattern is
+/// `rusage_info_current r; proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, (rusage_info_t*)&r)`);
+/// the SDK imports the buffer as a pointer to the void*-slot representation.
+/// rusage_info_v6 has current RSS only — the wait loop tracks peaks across
+/// samples.
+func procUsage(_ pid: pid_t) -> (UInt64, UInt64)? {
+    var info = rusage_info_current()
+    let result = withUnsafeMutablePointer(to: &info) { pointer in
+        proc_pid_rusage(
+            pid,
+            RUSAGE_INFO_CURRENT,
+            UnsafeMutableRawPointer(pointer).assumingMemoryBound(to: rusage_info_t?.self)
+        )
+    }
+    guard result == 0 else { return nil }
+    return (info.ri_resident_size, info.ri_user_time &+ info.ri_system_time)
 }
 
 func terminateApp(bundleID: String) {
@@ -143,14 +164,30 @@ func windowTitles(pid: pid_t) -> [String] {
 }
 
 /// Poll until any window title contains `needle`. Returns elapsed seconds.
-func waitForTitle(pid: pid_t, needle: String, timeout: TimeInterval) -> Double? {
+/// Samples the target app's rusage while waiting so each cell also reports
+/// peak RSS (cold: absolute peak; warm: relative to the sample taken before
+/// the open) and CPU consumed while becoming interactive.
+func waitForTitle(pid: pid_t, needle: String, timeout: TimeInterval) -> (Double, Double, Double)? {
     let t0 = DispatchTime.now()
     let deadline = Date().addingTimeInterval(timeout)
     let lower = needle.lowercased()
+    var peakRSS: UInt64 = 0
+    var cpuAtEnd: UInt64 = 0
+    var samples = 0
     while Date() < deadline {
         guard let current = pidForBundleID(bundleID) else { usleep(10_000); continue }
+        if samples % 10 == 0, let (rss, cpu) = procUsage(current) {
+            peakRSS = max(peakRSS, rss)
+            cpuAtEnd = cpu
+        }
+        samples += 1
         if windowTitles(pid: current).contains(where: { $0.lowercased().contains(lower) }) {
-            return Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e9
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e9
+            if let (rss, cpu) = procUsage(current) {
+                peakRSS = max(peakRSS, rss)
+                cpuAtEnd = max(cpuAtEnd, cpu)
+            }
+            return (elapsed, Double(peakRSS) / 1e6, Double(cpuAtEnd) / 1e6)
         }
         usleep(5_000)
     }
@@ -161,6 +198,8 @@ func waitForTitle(pid: pid_t, needle: String, timeout: TimeInterval) -> Double? 
 
 var samples: [Double] = []
 var failures = 0
+var rssSamples: [Double] = []
+var cpuSamples: [Double] = []
 
 func pathForRun(_ index: Int) -> String {
     file.replacingOccurrences(of: "%RUN%", with: String(index))
@@ -175,8 +214,10 @@ case "cold":
         usleep(300_000) // let WindowServer settle between launches
         let t0 = DispatchTime.now()
         runShell(openCommand.replacingOccurrences(of: "%FILE%", with: target))
-        if waitForTitle(pid: pidForBundleID(bundleID) ?? 0, needle: needle, timeout: timeoutSec) != nil {
+        if let (_, rss, cpu) = waitForTitle(pid: pidForBundleID(bundleID) ?? 0, needle: needle, timeout: timeoutSec) {
             samples.append(Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e9)
+            rssSamples.append(rss)
+            cpuSamples.append(cpu)
         } else {
             failures += 1
         }
@@ -201,11 +242,20 @@ case "warm":
         runShell(openCommand.replacingOccurrences(of: "%FILE%", with: decoy))
         _ = waitForTitle(pid: 0, needle: (decoy as NSString).lastPathComponent, timeout: timeoutSec)
         usleep(400_000)
+        // Baseline CPU before the open; the cell reports the delta the open
+        // itself consumed (the instance's history is not this cell's cost).
+        // waitForTitle reports CPU in milliseconds already.
+        var cpuBeforeMS = 0.0
+        if let pid = pidForBundleID(bundleID), let (_, cpu) = procUsage(pid) {
+            cpuBeforeMS = Double(cpu) / 1e6
+        }
         let command = openCommand.replacingOccurrences(of: "%FILE%", with: target)
         let t0 = DispatchTime.now()
         runShell(command)
-        if waitForTitle(pid: 0, needle: needle, timeout: timeoutSec) != nil {
+        if let (_, _, cpuAfter) = waitForTitle(pid: 0, needle: needle, timeout: timeoutSec) {
             samples.append(Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e9)
+            rssSamples.append(0) // cumulative instance RSS is not per-cell meaningful when warm
+            cpuSamples.append(max(0.0, cpuAfter - cpuBeforeMS))
         } else {
             failures += 1
         }
@@ -228,5 +278,11 @@ out += String(format: "median=%.6f\np90=%.6f\nmin=%.6f\nmax=%.6f\n",
               median,
               samples[min(samples.count - 1, Int((Double(samples.count - 1) * 0.9).rounded()))],
               samples.first!, samples.last!)
+if !rssSamples.isEmpty {
+    let sortedRSS = rssSamples.sorted()
+    let sortedCPU = cpuSamples.sorted()
+    out += String(format: "rss_median_mb=%.2f\ncpu_median_ms=%.2f\n",
+                  sortedRSS[sortedRSS.count / 2], sortedCPU[sortedCPU.count / 2])
+}
 out += samples.map { String(format: "sample=%.6f", $0) }.joined(separator: "\n") + "\n"
 FileHandle.standardOutput.write(out.data(using: .utf8)!)

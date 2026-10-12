@@ -79,8 +79,8 @@ record() { # editor variant lines mode median p90 min max ok failed
 # Quit sequences use ttybench escapes: \e ESC, \r CR, \xHH hex, "\;" 60ms pause.
 editor_spec() {
     case "$1" in
-        vim)   echo "/usr/bin/vim|--clean|\e\;:q\!\r||" ;;
-        nvim)  echo "/opt/homebrew/bin/nvim|--clean|\e\;:qa\!\r||" ;;
+        vim)   echo "/usr/bin/vim|--clean|\e\;:q\r|ctty|" ;;
+        nvim)  echo "/opt/homebrew/bin/nvim|--clean|\e\;:qa\r|ctty|" ;;
         kak)   echo "/opt/homebrew/bin/kak||\e\;:q\r|ctty|" ;;
         micro) echo "/opt/homebrew/bin/micro||\x11|ctty,init=y\r,env=MICRO_CONFIG_HOME=$TOOLCACHE/micro-run%RUN%|" ;;
         emacs) echo "/opt/homebrew/bin/emacs|-nw -q --no-site-file|\x18\x03|ctty|" ;;

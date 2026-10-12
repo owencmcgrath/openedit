@@ -65,33 +65,38 @@ let fileData = FileManager.default.contents(atPath: file)!
 let head = fileData.prefix(24)
 let needle = Array(head)
 
-func decodeKeys(_ s: String) -> [UInt8] {
-    var out: [UInt8] = []
-    let chars = Array(s.utf8)
-    var i = 0
-    while i < chars.count {
-        if chars[i] == 0x5C, i + 1 < chars.count { // backslash
-            switch chars[i + 1] {
-            case UInt8(ascii: "e"): out.append(0x1B); i += 2
-            case UInt8(ascii: "r"): out.append(0x0D); i += 2
-            case UInt8(ascii: "n"): out.append(0x0A); i += 2
-            case UInt8(ascii: "t"): out.append(0x09); i += 2
-            case UInt8(ascii: "x"):
-                if i + 3 < chars.count,
-                   let hi = UInt8(String(UnicodeScalar(chars[i + 2])), radix: 16),
-                   let lo = UInt8(String(UnicodeScalar(chars[i + 3])), radix: 16) {
-                    out.append(hi << 4 | lo); i += 4
-                } else { out.append(chars[i]); i += 1 }
-            case UInt8(ascii: ";"): // "\;" = 60ms pause
-                out.append(0xFE); i += 2 // placeholder for pause
-            default: out.append(chars[i]); i += 1
+    /// Decode a key-sequence string: \e ESC, \r CR, \n LF, \t TAB, \xHH hex,
+    /// "\;" = 60 ms pause. Any other backslash escape drops the backslash
+    /// (so \! means "!"), because a stray literal backslash inside a vim
+    /// command line means line-continuation and silently swallows the quit.
+    func decodeKeys(_ s: String) -> [UInt8] {
+        var out: [UInt8] = []
+        let chars = Array(s.utf8)
+        var i = 0
+        while i < chars.count {
+            if chars[i] == 0x5C, i + 1 < chars.count { // backslash
+                switch chars[i + 1] {
+                case UInt8(ascii: "e"): out.append(0x1B); i += 2
+                case UInt8(ascii: "r"): out.append(0x0D); i += 2
+                case UInt8(ascii: "n"): out.append(0x0A); i += 2
+                case UInt8(ascii: "t"): out.append(0x09); i += 2
+                case UInt8(ascii: "x"):
+                    if i + 3 < chars.count,
+                       let hi = UInt8(String(UnicodeScalar(chars[i + 2])), radix: 16),
+                       let lo = UInt8(String(UnicodeScalar(chars[i + 3])), radix: 16) {
+                        out.append(hi << 4 | lo); i += 4
+                    } else { i += 2 } // drop the broken escape
+                case UInt8(ascii: ";"): // "\;" = 60ms pause
+                    out.append(0xFE); i += 2
+                default:
+                    out.append(chars[i + 1]); i += 2 // \! -> !
+                }
+            } else {
+                out.append(chars[i]); i += 1
             }
-        } else {
-            out.append(chars[i]); i += 1
         }
+        return out
     }
-    return out
-}
 let quitBytes = decodeKeys(quitSeq)
 
 // MARK: - pty plumbing
@@ -109,14 +114,72 @@ func nonblocking(_ fd: Int32) {
     _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
 }
 
+/// (current resident bytes, user+system CPU nanoseconds) for `pid`, or nil
+/// when the process is gone. proc_pid_rusage fills a CALLER-ALLOCATED
+/// rusage_info struct (the classic C pattern is
+/// `rusage_info_current r; proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, (rusage_info_t*)&r)`);
+/// the SDK imports the buffer as a pointer to the void*-slot representation.
+/// rusage_info_v6 has current RSS only — callers track peaks across samples.
+func procUsage(_ pid: pid_t) -> (UInt64, UInt64)? {
+    var info = rusage_info_current()
+    let result = withUnsafeMutablePointer(to: &info) { pointer in
+        proc_pid_rusage(
+            pid,
+            RUSAGE_INFO_CURRENT,
+            UnsafeMutableRawPointer(pointer).assumingMemoryBound(to: rusage_info_t?.self)
+        )
+    }
+    guard result == 0 else { return nil }
+    return (info.ri_resident_size, info.ri_user_time &+ info.ri_system_time)
+}
+
+/// Cumulative user+system CPU of all reaped children, in microseconds —
+/// the delta around one serial run is exactly that child's CPU.
+func childrenCPU() -> Int64 {
+    var usage = rusage()
+    getrusage(RUSAGE_CHILDREN, &usage)
+    let userUS = Int64(usage.ru_utime.tv_sec) * 1_000_000 + Int64(usage.ru_utime.tv_usec)
+    let sysUS = Int64(usage.ru_stime.tv_sec) * 1_000_000 + Int64(usage.ru_stime.tv_usec)
+    return userUS + sysUS
+}
+
+/// NUL-terminated heap copy of a Swift string (this SDK's strdup returns a
+/// const pointer, which does not slot into the mutable C argv/envp arrays).
+func cString(_ s: String) -> UnsafeMutablePointer<CChar>? {
+    let length = s.utf8.count + 1
+    let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: length)
+    s.withCString { source in
+        memcpy(buffer, source, length)
+    }
+    return buffer
+}
+
 /// One timed run. Returns seconds from spawn until `needle` was painted, or nil on timeout/failure.
 func timedRun(runIndex: Int) -> Double? {
     guard let (master, slave) = openptyPair() else { return nil }
     defer { close(master) }
+    var peakRSSBytes: UInt64 = 0
+    let executable = cmd[0]
+    // The macOS 26 SDK imports posix_spawnattr_t as an opaque handle; the
+    // functions take pointers to optional handles that init() fills in.
+    // posix_spawn (not Foundation Process) because wait4 gives us this
+    // child's exact rusage, which Foundation's reaper hides.
+    let attrs = UnsafeMutablePointer<posix_spawnattr_t?>.allocate(capacity: 1)
+    attrs.pointee = nil
+    posix_spawnattr_init(attrs)
+    // No POSIX_SPAWN_SETSID: the session-less child inherits our (empty)
+    // process group, which is how the Foundation-Process version ran and how
+    // the quit keystrokes are delivered reliably; editors that need a real
+    // controlling terminal get one from script(1) in the launcher.
 
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: cmd[0])
-    proc.arguments = Array(cmd.dropFirst())
+    let actions = UnsafeMutablePointer<posix_spawn_file_actions_t?>.allocate(capacity: 1)
+    actions.pointee = nil
+    posix_spawn_file_actions_init(actions)
+    posix_spawn_file_actions_adddup2(actions, slave, 0)
+    posix_spawn_file_actions_adddup2(actions, slave, 1)
+    posix_spawn_file_actions_adddup2(actions, slave, 2)
+    posix_spawn_file_actions_addclose(actions, slave)
+
     var env = ProcessInfo.processInfo.environment
     env["TERM"] = term
     env["LC_ALL"] = "en_US.UTF-8"
@@ -124,18 +187,44 @@ func timedRun(runIndex: Int) -> Double? {
     for (key, template) in freshEnv {
         env[key] = template.replacingOccurrences(of: "%RUN%", with: String(runIndex))
     }
-    proc.environment = env
-    let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
-    proc.standardInput = slaveHandle
-    proc.standardOutput = slaveHandle
-    proc.standardError = slaveHandle
+    var envStrings: [UnsafeMutablePointer<CChar>?] = env.map { "\($0)=\($1)" }.map(cString)
+    envStrings.append(nil)
+    let envp = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: envStrings.count)
+    defer {
+        for i in 0..<envStrings.count {
+            if let s = envp[i] { free(s) }
+            envp.advanced(by: i).deinitialize(count: 1)
+        }
+        envp.deallocate()
+    }
+    for (i, s) in envStrings.enumerated() { envp.advanced(by: i).initialize(to: s) }
 
-    do { try proc.run() } catch { close(slave); return nil }
-    let pid = proc.processIdentifier
-    close(slave) // the child holds its own descriptors now
+    var argStrings: [UnsafeMutablePointer<CChar>?] = cmd.map(cString)
+    argStrings.append(nil)
+    let argv = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: argStrings.count)
+    defer {
+        for i in 0..<argStrings.count {
+            if let s = argv[i] { free(s) }
+            argv.advanced(by: i).deinitialize(count: 1)
+        }
+        argv.deallocate()
+    }
+    for (i, s) in argStrings.enumerated() { argv.advanced(by: i).initialize(to: s) }
+
+    var pid: pid_t = 0
+    let spawnErr = posix_spawn(&pid, executable, actions, attrs, argv, envp)
+    close(slave) // the child holds its own descriptors now (dup2 happened in its address space)
+    posix_spawn_file_actions_destroy(actions); actions.deallocate()
+    posix_spawnattr_destroy(attrs); attrs.deallocate()
+    guard spawnErr == 0 else {
+        FileHandle.standardError.write(Data("spawn err \(spawnErr) for \(cmd[0])\n".utf8))
+        return nil
+    }
+    var sampleCount = 0
 
     nonblocking(master)
     let t0 = DispatchTime.now()
+    var lastOutputAt = DispatchTime.now()
     var matched = false
     var raw: [UInt8] = []
     var buf = [UInt8](repeating: 0, count: 65536)
@@ -155,17 +244,24 @@ func timedRun(runIndex: Int) -> Double? {
             _ = write(master, initBytes, initBytes.count)
             initSent = true
         }
+        // Resource accounting: wait4 after exit provides the exact peak RSS
+        // and CPU for the run; nothing to sample in-loop.
+        sampleCount += 1
         let n = read(master, &buf, buf.count)
         if n > 0 {
+            lastOutputAt = DispatchTime.now()
             raw.append(contentsOf: buf[0..<n])
             if raw.count > 16384 { raw.removeFirst(raw.count - 16384) }
             // Editors (vim, emacs, ...) query the terminal at startup (DSR,
             // DA) and block until an answer arrives; a pty with no responder
             // would leave them hanging and poison the measurement. Answer
             // like a minimal terminal would.
-            let responses = responder.consume(Array(buf[0..<n]))
-            for response in responses {
-                _ = write(master, response, response.count)
+            // The responder can be disabled to isolate its behavior.
+            if ProcessInfo.processInfo.environment["TTYBENCH_NO_RESPONDER"] == nil {
+                let responses = responder.consume(Array(buf[0..<n]))
+                for response in responses {
+                    _ = write(master, response, response.count)
+                }
             }
             // The editor paints through ANSI escape sequences; strip them and
             // match on the visible text so interleaved color/cursor codes do
@@ -182,30 +278,64 @@ func timedRun(runIndex: Int) -> Double? {
         return nil
     }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e9
+    if let (rss, cpu) = procUsage(pid) {
+        peakRSSBytes = max(peakRSSBytes, rss)
+    }
+    runRSS.append(Double(peakRSSBytes) / 1e6)
 
-    // Quit the editor.
-    var chunk: [UInt8] = []
-    for b in quitBytes {
-        if b == 0xFE {
-            _ = write(master, chunk, chunk.count); chunk.removeAll(); usleep(60_000)
-        } else {
-            chunk.append(b)
+    // Quit the editor. Keys sent too early (during the editor's startup) get
+    // swallowed, and bursts sent as one write do not always register — send
+    // per byte with small gaps, like a human typing (validated: a burst left
+    // vim's cmdline command unprocessed).
+    usleep(500_000)
+    func sendQuitKeys() {
+        var pauseAfter = false
+        for b in quitBytes {
+            let written = write(master, [b], 1)
+            if ProcessInfo.processInfo.environment["TTYBENCH_DEBUG"] != nil {
+                let idleMS = Int(Double(DispatchTime.now().uptimeNanoseconds - lastOutputAt.uptimeNanoseconds) / 1e6)
+                FileHandle.standardError.write(Data("key \(String(b, radix: 16)) wrote=\(written) idleMs=\(idleMS)\n".utf8))
+            }
+            if pauseAfter { usleep(60_000); pauseAfter = false } else { usleep(30_000) }
         }
     }
-    if !chunk.isEmpty { _ = write(master, chunk, chunk.count) }
+    sendQuitKeys()
 
-    // Wait for exit; escalate if the quit keys did not land.
+    // Wait for exit; escalate if the quit keys did not land. wait4 returns
+    // this child's exact rusage (user+sys CPU in microseconds, peak RSS).
     let softDeadline = Date().addingTimeInterval(3)
-    while proc.isRunning {
-        if Date() > softDeadline { kill(pid, SIGTERM); break }
+    var status: Int32 = 0
+    var rusage = rusage()
+    var reaped = false
+    var retriedKeys = false
+    while Date() < softDeadline {
+        if wait4(pid, &status, WNOHANG, &rusage) == pid { reaped = true; break }
+        if !retriedKeys, Date() > softDeadline.addingTimeInterval(-1.5) {
+            sendQuitKeys()
+            retriedKeys = true
+        }
         usleep(10_000)
     }
-    let hardDeadline = Date().addingTimeInterval(2)
-    while proc.isRunning {
-        if Date() > hardDeadline { kill(pid, SIGKILL); break }
-        usleep(10_000)
+    if !reaped {
+        kill(pid, SIGTERM)
+        let hardDeadline = Date().addingTimeInterval(2)
+        while Date() < hardDeadline {
+            if wait4(pid, &status, WNOHANG, &rusage) == pid { reaped = true; break }
+            usleep(10_000)
+        }
+        if !reaped {
+            kill(pid, SIGKILL)
+            wait4(pid, &status, 0, &rusage)
+        }
     }
-    proc.waitUntilExit()
+    let childCPUUS = Int64(rusage.ru_utime.tv_sec) * 1_000_000 + Int64(rusage.ru_utime.tv_usec)
+        + Int64(rusage.ru_stime.tv_sec) * 1_000_000 + Int64(rusage.ru_stime.tv_usec)
+    if ProcessInfo.processInfo.environment["TTYBENCH_DEBUG"] != nil {
+        FileHandle.standardError.write(Data("debug: reaped=\(reaped) u=\(rusage.ru_utime.tv_sec)+\(rusage.ru_utime.tv_usec)us s=\(rusage.ru_stime.tv_sec)+\(rusage.ru_stime.tv_usec)us maxrss=\(rusage.ru_maxrss)\n".utf8))
+    }
+    runCPU.append(Double(childCPUUS) / 1e6)
+    let childPeakRSS = Double(rusage.ru_maxrss) / 1e6 // ru_maxrss is bytes on macOS
+    runRSS[max(0, runRSS.count - 1)] = max(runRSS.last ?? 0, childPeakRSS)
     return elapsed
 }
 
@@ -333,6 +463,8 @@ struct TerminalQueryResponder {
 
 var samples: [Double] = []
 var failures = 0
+var runRSS: [Double] = []
+var runCPU: [Double] = []
 for runIndex in 1...max(1, runs) {
     if let t = timedRun(runIndex: runIndex) { samples.append(t) } else { failures += 1 }
 }
@@ -352,5 +484,8 @@ let median = samples.count % 2 == 1
 
 var out = "runs=\(runs)\nok=\(samples.count)\nfailed=\(failures)\n"
 out += String(format: "median=%.6f\np90=%.6f\nmin=%.6f\nmax=%.6f\n", median, pct(90), samples.first!, samples.last!)
+out += String(format: "rss_peak_mb=%.2f\ncpu_median_ms=%.2f\n",
+              runRSS.sorted()[runRSS.count / 2],
+              runCPU.sorted()[runCPU.count / 2])
 out += samples.map { String(format: "sample=%.6f", $0) }.joined(separator: "\n") + "\n"
 FileHandle.standardOutput.write(out.data(using: .utf8)!)
