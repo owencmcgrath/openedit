@@ -39,6 +39,21 @@ final class OpenEditDocumentController: NSDocumentController {
     ) {
         let intent = Self.pendingIntent ?? .reuseExistingWindow
         Self.pendingIntent = nil
+        // Warm-open fast path (issue #38 phase 2): AppKit's open machinery
+        // reads and type-resolves before it discovers the document is already
+        // open; for an already-open file the only observable behavior is
+        // bringing its window forward, so do exactly that. (Standard
+        // NSDocumentController dedup semantics preserved.)
+        let canonicalURL = url.resolvingSymlinksInPath()
+        if let existing = documents.first(where: {
+            ($0 as? TextDocument)?.fileURL == canonicalURL
+        }), !existing.windowControllers.isEmpty {
+            let controller = existing.windowControllers.first
+            controller?.showWindow(nil)
+            controller?.window?.makeKeyAndOrderFront(nil)
+            completionHandlerForDocuments(existing, true, nil)
+            return
+        }
         // Resolve the reuse target before the open can make a new window
         // frontmost. A new-window intent always resolves to a new window, so
         // skip the window scan the router would discard anyway.
@@ -91,16 +106,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = OpenEditDocumentController()
     }
 
+    /// Suppress AppKit's untitled-at-launch pass (issue #38 phase 2). Its
+    /// window lands on the launch path and is dropped again when a file's
+    /// odoc wins the race; the app delegate's own deferred creation produces
+    /// the same Untitled window one run-loop turn later only when no file is
+    /// arriving — removing wasted work from every file launch.
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        buildMainMenu()
         hasFinishedLaunching = true
-
-        // Match the Dock/app-switcher icon to the system light/dark appearance.
-        appIcon.start()
-
-        // Track document-window open/close to toggle the Dock icon
-        // (ARCHITECTURE.md 5.13).
-        dockPresence.start()
 
         // Route server notifications (diagnostics) to the owning window
         // (ARCHITECTURE.md 5.9); each controller filters by its document URI.
@@ -108,11 +124,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppDelegate.routeServerNotification(message)
         }
 
-        // Request notification authorization at first launch (ARCHITECTURE.md
-        // 5.6); denial never blocks opening files. The notifier also asks again
-        // lazily before a notice, in case this runs before the user decides.
-        MissingLSPServerNotification.shared.start()
-
+        // File opens first (issue #38 phase 2): every deferred launch
+        // nicety below runs after the open flow has had the first run-loop
+        // turn, so `open -a OpenEdit.app file` never waits behind menu
+        // construction, Dock-presence observers, or UserNotifications setup.
         for url in launchArgumentURLs() {
             openFile(at: url, intent: .reuseExistingWindow)
         }
@@ -121,10 +136,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         pendingOpenURLs.removeAll()
 
+        DispatchQueue.main.async { [weak self] in
+            self?.deferredLaunchSetup()
+        }
+
         // Bare `swift run` executables get no AppKit untitled-at-launch pass
         // (no Info.plist), so supply the Untitled window manually. Deferred
         // one run-loop turn so a launch argument file isn't raced.
-        if !hasDocumentTypes, NSDocumentController.shared.documents.isEmpty {
+        // The bundled app now needs the same deferred creation because
+        // applicationShouldOpenUntitledFile suppresses AppKit's pass (issue
+        // #38 phase 2: don't build a window every file launch only to drop
+        // it when an odoc wins the race).
+        if NSDocumentController.shared.documents.isEmpty {
             DispatchQueue.main.async { [weak self] in
                 guard let self, NSDocumentController.shared.documents.isEmpty else { return }
                 self.openFile(at: nil, intent: .reuseExistingWindow)
@@ -144,15 +167,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Backstop for the Untitled fallback in case activation is delayed; the
-    /// Apple Event ordering note in applicationDidFinishLaunching applies.
-    /// Bundled apps get the untitled pass from AppKit, so only the bare
-    /// `swift run` executable (no Info.plist) uses this. Suppressed while the
-    /// app is deliberately hidden (ARCHITECTURE.md 5.13): activating a
-    /// windowless app from the app switcher must not resurrect a window — and
-    /// with it the Dock icon — until the user opens a file.
+    /// Launch niceties that must exist before the user interacts but do not
+    /// need to exist before the first file opens: main menu, Dock-presence
+    /// observers, app-icon appearance tracking, and the UserNotifications
+    /// authorization request (ARCHITECTURE.md 5.6 — denial never blocks
+    /// opening files).
+    private func deferredLaunchSetup() {
+        buildMainMenu()
+
+        // Match the Dock/app-switcher icon to the system light/dark appearance.
+        appIcon.start()
+
+        // Track document-window open/close to toggle the Dock icon
+        // (ARCHITECTURE.md 5.13).
+        dockPresence.start()
+
+        // Request notification authorization at first launch (ARCHITECTURE.md
+        // 5.6); denial never blocks opening files. The notifier also asks again
+        // lazily before a notice, in case this runs before the user decides.
+        MissingLSPServerNotification.shared.start()
+    }
+
+    /// Backstop for the deferred Untitled creation: if activation arrives
+    /// before the deferred pass ran (or documents closed since), open one.
+    /// Suppressed while the app is deliberately hidden (ARCHITECTURE.md
+    /// 5.13): activating a windowless app from the app switcher must not
+    /// resurrect a window — and with it the Dock icon — until the user opens
+    /// a file.
     func applicationDidBecomeActive(_ notification: Notification) {
-        if !hasDocumentTypes, !dockPresence.isHidden, NSDocumentController.shared.documents.isEmpty {
+        if !dockPresence.isHidden, NSDocumentController.shared.documents.isEmpty {
             openFile(at: nil, intent: .reuseExistingWindow)
         }
     }

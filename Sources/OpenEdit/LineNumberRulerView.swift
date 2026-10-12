@@ -257,29 +257,42 @@ final class LineNumberRulerView: NSRulerView {
     /// unichar buffer. A final newline adds an entry at `string.length` for
     /// the empty line after it. The old per-line `lineRange(for:)` walk made
     /// million-line opens pay millions of ObjC bridge calls; this is a single
-    /// linear scan (issue #38).
+    /// linear scan (issue #38). When the backing store exposes its characters
+    /// in place (the common case for NSTextStorage-backed strings) the 77 MB
+    /// copy is skipped entirely.
     private static func computeLineStarts(in string: NSString) -> [Int] {
         let length = string.length
         guard length > 0 else { return [0] }
 
-        var buffer = [unichar](repeating: 0, count: length)
-        string.getCharacters(&buffer, range: NSRange(location: 0, length: length))
+        if let inline = CFStringGetCharactersPtr(unsafeDowncast(string, to: CFString.self)) {
+            return scanLineStarts(UnsafeBufferPointer(start: inline, count: length), length: length)
+        }
+        var copied = [unichar](repeating: 0, count: length)
+        string.getCharacters(&copied, range: NSRange(location: 0, length: length))
+        return scanLineStarts(copied[...], length: length)
+    }
 
+    /// The newline scan over any Int-indexed unichar collection.
+    private static func scanLineStarts<C: RandomAccessCollection>(
+        _ chars: C,
+        length: Int
+    ) -> [Int] where C.Element == unichar, C.Index == Int {
         var starts: [Int] = [0]
         starts.reserveCapacity(max(16, length / 60 + 2))
-        var i = 0
-        while i < length {
-            let c = buffer[i]
+        var i = chars.startIndex
+        while i < chars.endIndex {
+            let c = chars[i]
             if isNewlineCodeUnit(c) {
                 // \r\n counts once, at the \n.
-                let isRNLead = c == 0x0D && i + 1 < length && buffer[i + 1] == 0x0A
-                if !isRNLead, i + 1 < length {
-                    starts.append(i + 1)
+                let next = chars.index(after: i)
+                let isRNLead = c == 0x0D && next < chars.endIndex && chars[next] == 0x0A
+                if !isRNLead, next < chars.endIndex {
+                    starts.append(next)
                 }
             }
-            i += 1
+            i = chars.index(after: i)
         }
-        if isNewlineCodeUnit(buffer[length - 1]) {
+        if let last = chars.last, isNewlineCodeUnit(last) {
             starts.append(length)
         }
         return starts
