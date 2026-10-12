@@ -69,17 +69,20 @@ record() { # editor variant lines mode median p90 min max ok failed
     printf '  %-8s %-9s %-8s %-6s median=%ss p90=%ss\n' "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
-# Per-editor launch command (file path appended), quit keystrokes, and an
-# optional "ctty" flag meaning the editor needs a real controlling terminal
-# (emacs opens /dev/tty; the harness pty alone is not enough, so the command
-# is wrapped in `script`, which provides one).
+# Per-editor launch command (file path appended), quit keystrokes, and a
+# comma-separated options list:
+#   ctty   — wrap in /usr/bin/script so the editor gets a controlling terminal
+#            (kakoune and micro's tcell open /dev/tty; emacs too)
+#   init=… — one-shot keystrokes sent ~400ms after spawn (first-run prompts)
+#   env=…  — child environment entry VAR=VALUE, %RUN% substituted per run, so
+#            editors that write session state (micro) get a pristine config
 # Quit sequences use ttybench escapes: \e ESC, \r CR, \xHH hex, "\;" 60ms pause.
 editor_spec() {
     case "$1" in
         vim)   echo "/usr/bin/vim|--clean|\e\;:q\!\r||" ;;
         nvim)  echo "/opt/homebrew/bin/nvim|--clean|\e\;:qa\!\r||" ;;
         kak)   echo "/opt/homebrew/bin/kak||\e\;:q\r|ctty|" ;;
-        micro) echo "/opt/homebrew/bin/micro|MICRO_CONFIG_HOME=$TOOLCACHE/micro-config|\x11|cttyenv|" ;;
+        micro) echo "/opt/homebrew/bin/micro||\x11|ctty,init=y\r,env=MICRO_CONFIG_HOME=$TOOLCACHE/micro-run%RUN%|" ;;
         emacs) echo "/opt/homebrew/bin/emacs|-nw -q --no-site-file|\x18\x03|ctty|" ;;
         *) return 1 ;;
     esac
@@ -95,7 +98,16 @@ for editor in "${editor_list[@]}"; do
     bin="${parts[0]}"
     extra_flags="${parts[1]}"
     quit="${parts[2]}"
-    needs_ctty="${parts[3]:-}"
+    editor_options="${parts[3]:-}"
+    needs_ctty=0 init_keys="" fresh_envs=()
+    IFS=',' read -r -a option_list <<< "$editor_options"
+    for option in "${option_list[@]}"; do
+        case "$option" in
+            ctty) needs_ctty=1 ;;
+            init=*) init_keys="${option#init=}" ;;
+            env=*) fresh_envs+=("${option#env=}") ;;
+        esac
+    done
     if ! command -v "$bin" >/dev/null 2>&1 && [[ ! -x "$bin" ]]; then
         echo "skip $editor: $bin not installed" >&2
         continue
@@ -108,20 +120,20 @@ for editor in "${editor_list[@]}"; do
         timeout="$(timeout_for_size "$lines")"
 
         if [[ "$MODE" == "tty" || "$MODE" == "both" ]]; then
-            if [[ "$needs_ctty" == "ctty" ]]; then
+            if [[ "$needs_ctty" == 1 ]]; then
                 launcher=(/usr/bin/script -q /dev/null "$bin")
-            elif [[ "$needs_ctty" == "cttyenv" ]]; then
-                # ctty + a private config home: script provides the
-                # controlling terminal tcell needs; env carries per-editor
-                # environment before the binary.
-                launcher=(/usr/bin/script -q /dev/null /usr/bin/env "$extra_flags" "$bin")
-                extra_flags=""
             else
                 launcher=("$bin")
             fi
+            fresh_env_args=()
+            for entry in "${fresh_envs[@]+"${fresh_envs[@]}"}"; do
+                fresh_env_args+=(--fresh-env "$entry")
+            done
             # shellcheck disable=SC2086
             out=$("$TOOLCACHE/ttybench" --file "$file" --runs "$runs" --timeout-sec "$timeout" \
-                --quit "$quit" -- "${launcher[@]}" $extra_flags "$file" 2>&1) || true
+                --quit "$quit" ${init_keys:+"--init" "$init_keys"} \
+                ${fresh_env_args[@]+"${fresh_env_args[@]}"} \
+                -- "${launcher[@]}" $extra_flags "$file" 2>&1) || true
             parsed=$(printf '%s\n' "$out" | awk -F= '{v[$1]=$2}END{printf "%s %s %s %s %s %s", v["median"],v["p90"],v["min"],v["max"],v["ok"],v["failed"]}')
             read -r median p90 mn mx ok failed <<< "$parsed"
             if [[ -z "$median" ]]; then

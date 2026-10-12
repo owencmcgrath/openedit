@@ -31,6 +31,7 @@ var term = "xterm-256color"
 var quitSeq = ""
 var initSeq = ""
 var dumpPath = ""
+var freshEnv: [(key: String, template: String)] = []
 var cmd: [String] = []
 
 var it = CommandLine.arguments.dropFirst().makeIterator()
@@ -43,6 +44,12 @@ while let arg = it.next() {
     case "--quit": quitSeq = it.next() ?? ""
     case "--init": initSeq = it.next() ?? ""
     case "--dump": dumpPath = it.next() ?? ""
+    case "--fresh-env":
+        // VAR=TEMPLATE, with %RUN% substituted per run. Gives editors that
+        // write session state into a config dir a pristine one each run.
+        if let spec = it.next(), let eq = spec.firstIndex(of: "=") {
+            freshEnv.append((String(spec[..<eq]), String(spec[spec.index(after: eq)...])))
+        }
     case "--": cmd = Array(it); break
     default: break
     }
@@ -103,7 +110,7 @@ func nonblocking(_ fd: Int32) {
 }
 
 /// One timed run. Returns seconds from spawn until `needle` was painted, or nil on timeout/failure.
-func timedRun() -> Double? {
+func timedRun(runIndex: Int) -> Double? {
     guard let (master, slave) = openptyPair() else { return nil }
     defer { close(master) }
 
@@ -114,6 +121,9 @@ func timedRun() -> Double? {
     env["TERM"] = term
     env["LC_ALL"] = "en_US.UTF-8"
     env.removeValue(forKey: "VIM") // keep --clean runs clean
+    for (key, template) in freshEnv {
+        env[key] = template.replacingOccurrences(of: "%RUN%", with: String(runIndex))
+    }
     proc.environment = env
     let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
     proc.standardInput = slaveHandle
@@ -323,8 +333,8 @@ struct TerminalQueryResponder {
 
 var samples: [Double] = []
 var failures = 0
-for _ in 0..<runs {
-    if let t = timedRun() { samples.append(t) } else { failures += 1 }
+for runIndex in 1...max(1, runs) {
+    if let t = timedRun(runIndex: runIndex) { samples.append(t) } else { failures += 1 }
 }
 guard !samples.isEmpty else {
     FileHandle.standardError.write("ttybench: every run failed\n".data(using: .utf8)!)
