@@ -20,9 +20,9 @@ import pathlib
 import sys
 
 def load(path: pathlib.Path, variant: str):
-    rows = []
+    rows = {}
     if not path.exists():
-        return rows
+        return []
     for line in path.read_text().splitlines():
         parts = line.split("\t")
         if len(parts) != 10:
@@ -30,15 +30,17 @@ def load(path: pathlib.Path, variant: str):
         editor, var, lines, mode, median, p90, mn, mx, ok, failed = parts
         if var != variant:
             continue
-        rows.append({
+        row = {
             "editor": editor, "lines": int(lines), "mode": mode,
             "median": float(median) if median not in ("DNF", "") else None,
             "p90": float(p90) if p90 not in ("DNF", "") else None,
             "min": float(mn) if mn not in ("DNF", "") else None,
             "max": float(mx) if mx not in ("DNF", "") else None,
             "ok": int(ok or 0), "failed": int(failed or 0),
-        })
-    return rows
+        }
+        # Cells can be re-measured (appended); the latest row wins.
+        rows[(editor, int(lines), mode)] = row
+    return list(rows.values())
 
 def fmt(seconds):
     if seconds is None:
