@@ -22,12 +22,6 @@ final class LineNumberRulerView: NSRulerView {
 
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(textDidChange),
-            name: NSText.didChangeNotification,
-            object: textView
-        )
-        NotificationCenter.default.addObserver(
-            self,
             selector: #selector(setNeedsRedraw),
             name: NSTextView.didChangeSelectionNotification,
             object: textView
@@ -110,7 +104,17 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
-    @objc private func textDidChange() {
+    /// Drop the cached line starts so the next draw recomputes them from the
+    /// text view's current content. The window controller calls this on every
+    /// character edit — user keystrokes through its `NSTextStorage` delegate,
+    /// programmatic replacement (initial load, watcher reload, 5.3) directly —
+    /// because the ruler cannot observe those changes itself: setting
+    /// `NSTextView.string` posts no `NSText.didChangeNotification`, and
+    /// `NSTextStorage.didProcessEditingNotification` carries no edit mask to
+    /// separate character edits from the highlighter's attribute writes (5.4).
+    /// Dropping the cache here instead of waiting for the next draw also keeps
+    /// the digit-count width correct before anything scrolls.
+    func invalidate() {
         lineStartsValid = false
         updateThickness()
         needsDisplay = true
@@ -184,8 +188,9 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     /// 1-based line number containing `characterIndex`, via binary search over
-    /// the cached line starts.
-    private func lineNumber(forCharacterIndex characterIndex: Int) -> Int {
+    /// the cached line starts. Internal so the windowing regression tests (#37)
+    /// can assert the numbering a draw would produce.
+    func lineNumber(forCharacterIndex characterIndex: Int) -> Int {
         var low = 0
         var high = lineStarts.count - 1
         while low < high {

@@ -141,7 +141,7 @@ These are the seams between components — pin these down precisely since they l
 
 ### 5.7 Line Number Gutter
 
-**[Default]** Implemented as an `NSRulerView` attached to the scroll view's `verticalRulerView`, the standard AppKit mechanism for editor gutters (this is how Xcode and BBEdit do it) — it tracks the text view's line-fragment geometry automatically on scroll/wrap/zoom, rather than a hand-rolled overlay `NSView` that has to stay manually in sync. Redraws on `NSTextView`'s `didChangeSelection`/text-change notifications to keep the current-line indicator (if any) and digit count (for files crossing power-of-ten line counts) up to date.
+**[Default]** Implemented as an `NSRulerView` attached to the scroll view's `verticalRulerView`, the standard AppKit mechanism for editor gutters (this is how Xcode and BBEdit do it) — it tracks the text view's line-fragment geometry automatically on scroll/wrap/zoom, rather than a hand-rolled overlay `NSView` that has to stay manually in sync. Redraws on `NSTextView`'s `didChangeSelection` notification, and its cached line starts are invalidated on every character edit — user edits through the window controller's `NSTextStorage` delegate, programmatic replacement (initial load, watcher reload) via an explicit call — because no ruler-observable notification covers a programmatic `NSTextView.string` replacement (#37), keeping the digit count (for files crossing power-of-ten line counts) up to date.
 
 ### 5.8 Appearance / Theming
 
