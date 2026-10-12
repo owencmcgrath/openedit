@@ -128,6 +128,7 @@ func timedRun() -> Double? {
     var raw: [UInt8] = []
     var buf = [UInt8](repeating: 0, count: 65536)
     let deadline = Date().addingTimeInterval(timeoutSec)
+    var responder = TerminalQueryResponder()
     defer {
         if !dumpPath.isEmpty { try? Data(raw).write(to: URL(fileURLWithPath: dumpPath)) }
     }
@@ -137,6 +138,14 @@ func timedRun() -> Double? {
         if n > 0 {
             raw.append(contentsOf: buf[0..<n])
             if raw.count > 16384 { raw.removeFirst(raw.count - 16384) }
+            // Editors (vim, emacs, ...) query the terminal at startup (DSR,
+            // DA) and block until an answer arrives; a pty with no responder
+            // would leave them hanging and poison the measurement. Answer
+            // like a minimal terminal would.
+            let responses = responder.consume(Array(buf[0..<n]))
+            for response in responses {
+                _ = write(master, response, response.count)
+            }
             // The editor paints through ANSI escape sequences; strip them and
             // match on the visible text so interleaved color/cursor codes do
             // not break a contiguous-content check.
@@ -223,6 +232,79 @@ enum ANSIStripper {
             }
         }
         return out
+    }
+}
+
+/// Answers the startup queries editors send a real terminal (a pty with no
+/// responder can leave vim/emacs blocked mid-paint, which silently inflates
+/// every sample or times runs out entirely).
+struct TerminalQueryResponder {
+    private var state = ANSIStripper.State.normal
+    private var csiBody: [UInt8] = []
+    private var oscBody: [UInt8] = []
+    private var awaitingOSCTerminator = false
+
+    /// Feed output bytes; returns canned responses to append to the pty master.
+    mutating func consume(_ bytes: [UInt8]) -> [[UInt8]] {
+        var out: [[UInt8]] = []
+        for b in bytes {
+            switch state {
+            case .normal:
+                if b == 0x1B { state = .escape; csiBody = []; oscBody = [] }
+            case .escape:
+                switch b {
+                case 0x5B: state = .csi
+                case 0x5D: state = .osc; awaitingOSCTerminator = false
+                case 0x50: state = .osc // DCS (XTGETTCAP etc.)
+                case 0x20...0x2F: break // intermediate byte, stay
+                default: state = .normal
+                }
+            case .csi:
+                if b >= 0x40 && b <= 0x7E {
+                    // Final byte: classify the complete CSI sequence.
+                    let response = Self.respondCSI(csiBody, final: b)
+                    if let response { out.append(response) }
+                    state = .normal
+                } else {
+                    csiBody.append(b)
+                }
+            case .osc:
+                if b == 0x07 { state = .normal }
+                else if b == 0x1B { state = .oscEscape }
+                else { oscBody.append(b) }
+            case .oscEscape:
+                state = (b == 0x5C) ? .normal : .osc
+            }
+        }
+        return out
+    }
+
+    private static func respondCSI(_ body: [UInt8], final: UInt8) -> [UInt8]? {
+        let text = String(decoding: body, as: UTF8.self)
+        switch (body.isEmpty ? "" : text, final) {
+        case (_, 0x6E): // 'n' — device status report variants
+            if body.isEmpty || text == "6" { return Array("[1;1R".utf8) }
+            if text == "5" { return Array("[0n".utf8) }
+            if text.hasPrefix("?6") { return Array("[99;1;1;0R".utf8) }
+            return Array("[0n".utf8)
+        case ("", 0x63): // CSI c — primary DA
+            return Array("[?1;2c".utf8)
+        case (_, 0x63): // CSI > c / = c — secondary/tertiary DA
+            if text.hasPrefix(">") { return Array("[>0;277;0c".utf8) }
+            if text.hasPrefix("=") { return Array("\u{1b}P!|00000000\u{1b}\\".utf8) }
+            return Array("[?1;2c".utf8)
+        case (_, 0x70): // 'p' — DECRQM (e.g. kakoune's CSI ? 2026 $ p)
+            guard text.hasSuffix("$") else { return nil }
+            let mode = String(text.dropLast(1))
+            // "not recognized" for every mode: editors fall back to plain
+            // painting, which is exactly what the harness wants to observe.
+            return Array("[?\(mode);2$y".utf8)
+        case (_, 0x75): // 'u' — kitty keyboard protocol query CSI ? u
+            if text.hasPrefix("?") { return Array("[?0u".utf8) }
+            return nil
+        default:
+            return nil
+        }
     }
 }
 

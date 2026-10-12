@@ -69,15 +69,18 @@ record() { # editor variant lines mode median p90 min max ok failed
     printf '  %-8s %-9s %-8s %-6s median=%ss p90=%ss\n' "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
-# Per-editor launch command (file path appended) and quit keystrokes.
+# Per-editor launch command (file path appended), quit keystrokes, and an
+# optional "ctty" flag meaning the editor needs a real controlling terminal
+# (emacs opens /dev/tty; the harness pty alone is not enough, so the command
+# is wrapped in `script`, which provides one).
 # Quit sequences use ttybench escapes: \e ESC, \r CR, \xHH hex, "\;" 60ms pause.
 editor_spec() {
     case "$1" in
-        vim)   echo "/usr/bin/vim|--clean|\e\;:q\!\r" ;;
-        nvim)  echo "/opt/homebrew/bin/nvim|--clean|\e\;:qa\!\r" ;;
-        kak)   echo "/opt/homebrew/bin/kak||\e\;:q\r" ;;
-        micro) echo "/opt/homebrew/bin/micro|--clean|\x11" ;;
-        emacs) echo "/opt/homebrew/bin/emacs|-nw -q --no-site-file|\x18\x03" ;;
+        vim)   echo "/usr/bin/vim|--clean|\e\;:q\!\r||" ;;
+        nvim)  echo "/opt/homebrew/bin/nvim|--clean|\e\;:qa\!\r||" ;;
+        kak)   echo "/opt/homebrew/bin/kak||\e\;:q\r||" ;;
+        micro) echo "/opt/homebrew/bin/micro|--clean|\x11||" ;;
+        emacs) echo "/opt/homebrew/bin/emacs|-nw -q --no-site-file|\x18\x03|ctty|" ;;
         *) return 1 ;;
     esac
 }
@@ -92,6 +95,7 @@ for editor in "${editor_list[@]}"; do
     bin="${parts[0]}"
     extra_flags="${parts[1]}"
     quit="${parts[2]}"
+    needs_ctty="${parts[3]:-}"
     if ! command -v "$bin" >/dev/null 2>&1 && [[ ! -x "$bin" ]]; then
         echo "skip $editor: $bin not installed" >&2
         continue
@@ -104,9 +108,14 @@ for editor in "${editor_list[@]}"; do
         timeout="$(timeout_for_size "$lines")"
 
         if [[ "$MODE" == "tty" || "$MODE" == "both" ]]; then
+            if [[ "$needs_ctty" == "ctty" ]]; then
+                launcher=(script -q /dev/null "$bin")
+            else
+                launcher=("$bin")
+            fi
             # shellcheck disable=SC2086
             out=$("$TOOLCACHE/ttybench" --file "$file" --runs "$runs" --timeout-sec "$timeout" \
-                --quit "$quit" -- "$bin" $extra_flags "$file" 2>&1) || true
+                --quit "$quit" -- "${launcher[@]}" $extra_flags "$file" 2>&1) || true
             parsed=$(printf '%s\n' "$out" | awk -F= '{v[$1]=$2}END{printf "%s %s %s %s %s %s", v["median"],v["p90"],v["min"],v["max"],v["ok"],v["failed"]}')
             read -r median p90 mn mx ok failed <<< "$parsed"
             if [[ -z "$median" ]]; then
