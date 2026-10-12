@@ -9,6 +9,10 @@ import AppKit
 /// Only document windows count. The Settings window (#8) does not keep the app
 /// in the Dock: it is a transient auxiliary surface, not an editing session
 /// (owner decision, #32).
+///
+/// Closing the last document window while the app is frontmost also drops the
+/// app off the front entirely: it hides, returning focus to the previously
+/// active app instead of lingering as an active-but-invisible accessory (#39).
 final class DockPresenceController {
     /// Pure mapping from open-document-window count to the activation policy the
     /// app should advertise. `.regular` while at least one document window
@@ -16,6 +20,25 @@ final class DockPresenceController {
     /// bar, but still reachable through the app switcher and the CLI.
     static func activationPolicy(forDocumentWindowCount count: Int) -> NSApplication.ActivationPolicy {
         count > 0 ? .regular : .accessory
+    }
+
+    /// Pure decision for the last-window focus hand-off (#39): the only
+    /// transition that must move focus is dropping `.regular → .accessory`
+    /// while the app holds it and no window at all remains on screen (the
+    /// caller excludes the window mid-close). Without the hand-off the app
+    /// stays frontmost as an active-but-invisible accessory — no Dock icon, no
+    /// menu bar, no window — and the user has to click back into whatever they
+    /// were in before. Every other case must not touch focus: a restore to
+    /// `.regular` never steals it, an inactive app has none to give, and a
+    /// remaining window (e.g. Settings, which does not count as a document
+    /// window) would be hidden out from under the user.
+    static func shouldYieldActivation(
+        from: NSApplication.ActivationPolicy,
+        to: NSApplication.ActivationPolicy,
+        isActive: Bool,
+        hasWindows: Bool
+    ) -> Bool {
+        from == .regular && to == .accessory && isActive && !hasWindows
     }
 
     /// True while the app has hidden its Dock icon. Read from the app's actual
@@ -84,16 +107,39 @@ final class DockPresenceController {
     }
 
     private func recompute(excluding excluded: NSWindow? = nil) {
-        apply(Self.activationPolicy(forDocumentWindowCount: documentWindowCount(excluding: excluded)))
+        // `excluded` is still present in `NSApp.windows` mid-close, so the
+        // anything-else-on-screen check skips it too — otherwise the window
+        // being closed would veto its own focus hand-off.
+        let otherWindowsRemain = NSApp.windows.contains { $0 !== excluded && $0.isVisible }
+        apply(
+            Self.activationPolicy(forDocumentWindowCount: documentWindowCount(excluding: excluded)),
+            otherWindowsRemain: otherWindowsRemain
+        )
     }
 
-    private func apply(_ policy: NSApplication.ActivationPolicy) {
-        guard NSApp.activationPolicy() != policy else { return }
+    private func apply(_ policy: NSApplication.ActivationPolicy, otherWindowsRemain: Bool) {
+        let previous = NSApp.activationPolicy()
+        guard previous != policy else { return }
+        let isActive = NSApp.isActive
         NSApp.setActivationPolicy(policy)
-        if policy == .regular, !NSApp.isActive {
-            // Restoring the Dock icon: bring the app forward only when it is not
-            // already frontmost, so a restore does not re-activate (and steal
-            // focus from) the app the user is actually working in.
+        if Self.shouldYieldActivation(
+            from: previous, to: policy, isActive: isActive, hasWindows: otherWindowsRemain
+        ) {
+            // Drop off the front, #39: hiding right after the policy change
+            // makes macOS re-activate the app the user came from (e.g. the
+            // launching terminal), and matches 5.13's no-window/no-menu-bar
+            // intent. The hidden app stays reachable via the app switcher and
+            // the CLI.
+            NSApp.hide(nil)
+        } else if policy == .regular, !NSApp.isActive {
+            // Restoring the Dock icon: bring the app forward only when it is
+            // not already frontmost, so a restore does not re-activate (and
+            // steal focus from) the app the user is actually working in.
+            // Unhide first when the yield path above hid the app — activate()
+            // alone does not lift a hidden app back on screen.
+            if NSApp.isHidden {
+                NSApp.unhide(nil)
+            }
             NSApp.activate(ignoringOtherApps: true)
         }
     }
