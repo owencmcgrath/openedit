@@ -78,8 +78,8 @@ editor_spec() {
     case "$1" in
         vim)   echo "/usr/bin/vim|--clean|\e\;:q\!\r||" ;;
         nvim)  echo "/opt/homebrew/bin/nvim|--clean|\e\;:qa\!\r||" ;;
-        kak)   echo "/opt/homebrew/bin/kak||\e\;:q\r||" ;;
-        micro) echo "/opt/homebrew/bin/micro|--clean|\x11||" ;;
+        kak)   echo "/opt/homebrew/bin/kak||\e\;:q\r|ctty|" ;;
+        micro) echo "/opt/homebrew/bin/micro|MICRO_CONFIG_HOME=$TOOLCACHE/micro-config|\x11|cttyenv|" ;;
         emacs) echo "/opt/homebrew/bin/emacs|-nw -q --no-site-file|\x18\x03|ctty|" ;;
         *) return 1 ;;
     esac
@@ -109,7 +109,13 @@ for editor in "${editor_list[@]}"; do
 
         if [[ "$MODE" == "tty" || "$MODE" == "both" ]]; then
             if [[ "$needs_ctty" == "ctty" ]]; then
-                launcher=(script -q /dev/null "$bin")
+                launcher=(/usr/bin/script -q /dev/null "$bin")
+            elif [[ "$needs_ctty" == "cttyenv" ]]; then
+                # ctty + a private config home: script provides the
+                # controlling terminal tcell needs; env carries per-editor
+                # environment before the binary.
+                launcher=(/usr/bin/script -q /dev/null /usr/bin/env "$extra_flags" "$bin")
+                extra_flags=""
             else
                 launcher=("$bin")
             fi

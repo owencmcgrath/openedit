@@ -29,6 +29,7 @@ var runs = 10
 var timeoutSec = 30.0
 var term = "xterm-256color"
 var quitSeq = ""
+var initSeq = ""
 var dumpPath = ""
 var cmd: [String] = []
 
@@ -40,6 +41,7 @@ while let arg = it.next() {
     case "--timeout-sec": timeoutSec = Double(it.next() ?? "30") ?? 30
     case "--term": term = it.next() ?? term
     case "--quit": quitSeq = it.next() ?? ""
+    case "--init": initSeq = it.next() ?? ""
     case "--dump": dumpPath = it.next() ?? ""
     case "--": cmd = Array(it); break
     default: break
@@ -129,11 +131,20 @@ func timedRun() -> Double? {
     var buf = [UInt8](repeating: 0, count: 65536)
     let deadline = Date().addingTimeInterval(timeoutSec)
     var responder = TerminalQueryResponder()
+    // One-shot pre-open keystrokes (e.g. answering a first-run prompt); sent
+    // shortly after spawn so they land before the editor reads input.
+    let initBytes: [UInt8] = decodeKeys(initSeq)
+    var initSent = false
     defer {
         if !dumpPath.isEmpty { try? Data(raw).write(to: URL(fileURLWithPath: dumpPath)) }
     }
 
     while !matched && Date() < deadline {
+        if !initSent, !initBytes.isEmpty,
+           Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) > 0.4 {
+            _ = write(master, initBytes, initBytes.count)
+            initSent = true
+        }
         let n = read(master, &buf, buf.count)
         if n > 0 {
             raw.append(contentsOf: buf[0..<n])
