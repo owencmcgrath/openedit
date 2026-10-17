@@ -4,11 +4,11 @@ import Testing
 @testable import OpenEditHighlighting
 
 /// Acceptance coverage for ARCHITECTURE.md 5.4 / 5.8: tree-sitter highlighting
-/// keyed off the config grammar mapping, dynamic system colors, incremental
-/// re-highlight limited to the affected range, and plain-text fallback when the
-/// mapping or grammar is missing.
+/// keyed off the config grammar mapping, the GitHub theme's dynamic colors,
+/// incremental re-highlight limited to the affected range, and plain-text
+/// fallback when the mapping or grammar is missing.
 @Suite @MainActor struct TreeSitterHighlighterTests {
-    private let theme = SyntaxTheme.system
+    private let theme = SyntaxTheme.github
 
     // MARK: - Helpers
 
@@ -298,6 +298,54 @@ import Testing
         let dark = resolved(label, in: darkAppearance)
         #expect(light != nil && dark != nil)
         #expect(light != dark)
+    }
+
+    /// The GitHub palette is pinned to exact Primer hex values, per
+    /// appearance (ARCHITECTURE.md 5.8): a drift back to system colors, or a
+    /// light/dark mix-up in `githubColor`, fails here.
+    @Test func githubThemePinsPrimerHexesPerAppearance() {
+        guard let lightAppearance = NSAppearance(named: .aqua),
+              let darkAppearance = NSAppearance(named: .darkAqua)
+        else {
+            Issue.record("missing appearances")
+            return
+        }
+
+        // `capture: nil` means the theme's default foreground.
+        let expectations: [(capture: String?, light: UInt32, dark: UInt32)] = [
+            (nil, 0x1F2328, 0xE6EDF3),       // editor.foreground — fg.default
+            ("keyword", 0xCF222E, 0xFF7B72), // scale.red[5] / red[3]
+            ("string", 0x0A3069, 0xA5D6FF),  // scale.blue[8] / blue[1]
+            ("number", 0x0550AE, 0x79C0FF),  // scale.blue[6] / blue[2]
+            ("type.builtin", 0x0550AE, 0x79C0FF), // `support`: builtin types ride the blue stop
+            ("comment", 0x6E7781, 0x8B949E), // scale.gray[5] / gray[3]
+            ("function", 0x8250DF, 0xD2A8FF),// scale.purple[5] / purple[2]
+            ("type", 0x953800, 0xFFA657),    // scale.orange[6] / orange[2]
+            ("tag", 0x116329, 0x7EE787)      // scale.green[6] / green[1]
+        ]
+
+        for expectation in expectations {
+            let color = expectation.capture.map { theme.color(forCapture: $0) } ?? theme.foreground
+            #expect(
+                hex(of: color, in: lightAppearance) == expectation.light,
+                "light \(expectation.capture ?? "foreground")"
+            )
+            #expect(
+                hex(of: color, in: darkAppearance) == expectation.dark,
+                "dark \(expectation.capture ?? "foreground")"
+            )
+        }
+    }
+
+    private func hex(of color: NSColor?, in appearance: NSAppearance) -> UInt32? {
+        guard let color, let resolved = resolved(color, in: appearance) else { return nil }
+        let byte = { (component: CGFloat) -> UInt32 in
+            UInt32((min(1, max(0, component)) * 255).rounded())
+        }
+        let red = byte(resolved.redComponent) << 16
+        let green = byte(resolved.greenComponent) << 8
+        let blue = byte(resolved.blueComponent)
+        return red | green | blue
     }
 
     private func resolved(_ color: NSColor, in appearance: NSAppearance) -> NSColor? {
