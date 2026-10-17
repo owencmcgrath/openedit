@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import OpenEditLSP
+import OpenEditWindowing
 
 /// Identity snapshot of a file on disk, used to coalesce watcher events for a
 /// single write (including the echo of this document's own save) into one
@@ -32,7 +33,21 @@ struct FileStat: Equatable {
 final class TextDocument: NSDocument {
     static let fileTypeIdentifier = "public.plain-text"
 
+    /// Options parsed from the CLI URL for the next open of a path. AppKit's
+    /// odoc flow calls `read(from:)` synchronously, so the app stashes the
+    /// options here immediately before handing the URL to NSDocumentController
+    /// (ARCHITECTURE.md 5.1). Entries are consumed by `read`.
+    static var pendingOpenOptions: [URL: OpenDocumentOptions] = [:]
+    static var pendingOpenSelections: [URL: TextSelection] = [:]
+
     private(set) var text: String = ""
+    private(set) var openOptions = OpenDocumentOptions()
+    private(set) var initialSelection: TextSelection?
+
+    /// The line ending the document writes back. `nil` means "preserve the
+    /// text exactly as loaded"; an explicit `--eol` normalizes on load and
+    /// converts on save.
+    private var activeLineEnding: OpenLineEnding = .lf
 
     /// True for Untitled documents created by the launch machinery (AppKit's
     /// untitled-at-launch pass and the bare-executable fallbacks all route
@@ -46,6 +61,18 @@ final class TextDocument: NSDocument {
     private var watcher: FileChangeWatcher?
     private var lastKnownFileStat: FileStat?
 
+    /// `--stdin`'s temp file, so a Save As elsewhere keeps it while a discard
+    /// (or an in-place save) removes the scratch original (ARCHITECTURE.md 5.1).
+    private var scratchOriginalURL: URL?
+
+    private var waitStatusURL: URL? {
+        openOptions.waitToken.map { URL(fileURLWithPath: $0) }
+    }
+
+    /// The most recent save destination, so a scratch document reports a path
+    /// only when the user actually saved it (ARCHITECTURE.md 5.1).
+    private var waitSavedPath: String?
+
     /// The app only ever reads and writes plain text; set the type directly so
     /// NSDocument's save machinery has a writable type without consulting an
     /// Info.plist type table (which the bare `swift run` executable lacks).
@@ -58,23 +85,57 @@ final class TextDocument: NSDocument {
     }
 
     override func read(from data: Data, ofType typeName: String) throws {
-        guard let newText = Self.decode(data) else {
+        if let canonicalURL = fileURL?.standardizedFileURL {
+            if let pending = Self.pendingOpenOptions.removeValue(forKey: canonicalURL) {
+                openOptions = pending
+                if pending.isScratch {
+                    scratchOriginalURL = canonicalURL
+                }
+            }
+            initialSelection = Self.pendingOpenSelections.removeValue(forKey: canonicalURL)
+        }
+
+        guard let decoded = Self.decode(data, encodingName: openOptions.encoding) else {
+            let message: String
+            if let encoding = openOptions.encoding {
+                message = "File is not decodable as text in the requested encoding (\(encoding))."
+            } else {
+                message = "File is not decodable as text (tried UTF-8 and ISO Latin-1)."
+            }
             throw CocoaError(
                 .fileReadCorruptFile,
-                userInfo: [NSLocalizedDescriptionKey: "File is not decodable as text (tried UTF-8 and ISO Latin-1)."]
+                userInfo: [NSLocalizedDescriptionKey: message]
             )
         }
-        text = newText
+
+        activeLineEnding = openOptions.lineEnding
+            ?? (decoded.contains("\r\n") ? .crlf : .lf)
+        if openOptions.lineEnding != nil {
+            text = Self.normalizedLineEndings(decoded, to: .lf)
+        } else {
+            text = decoded
+        }
         refreshWatchState()
     }
 
     override func data(ofType typeName: String) throws -> Data {
-        Data(text.utf8)
+        let lineEnding = openOptions.lineEnding ?? activeLineEnding
+        let normalized = openOptions.lineEnding == nil
+            ? text
+            : Self.normalizedLineEndings(text, to: lineEnding)
+        if let encodingName = openOptions.encoding,
+           let encoding = OpenTextEncoding.stringEncoding(forName: encodingName),
+           let data = normalized.data(using: encoding)
+        {
+            return data
+        }
+        return Data(normalized.utf8)
     }
 
     override func makeWindowControllers() {
         addWindowController(DocumentWindowController(document: self))
         startLanguageServerFlow()
+        updateWaitStatus(state: "open")
     }
 
     /// One document-open event for the language-server side (ARCHITECTURE.md
@@ -82,10 +143,14 @@ final class TextDocument: NSDocument {
     /// hand the single verdict to both the missing-LSP notice (#7) and the
     /// process pool (#6), so one open cannot both warn and launch.
     private func startLanguageServerFlow() {
-        guard let fileURL,
-              let language = DocumentLanguageMapping.resolvedLanguage(for: fileURL)
+        guard openOptions.lspEnabled,
+              let fileURL,
+              let language = DocumentLanguageMapping.lspLanguage(for: fileURL, options: openOptions)
         else { return }
 
+        if let lspLogPath = openOptions.lspLogPath {
+            ProcessTransport.stderrLogURL = URL(fileURLWithPath: lspLogPath)
+        }
         let availability = LanguageServerLocator.resolve(language: language)
         MissingLSPServerNotification.shared.handleDocumentOpen(
             language: language,
@@ -94,7 +159,9 @@ final class TextDocument: NSDocument {
         LanguageServerPool.shared.documentOpened(
             fileURL: fileURL,
             initialText: text,
-            availability: availability
+            availability: availability,
+            languageID: language.languageID,
+            resolvedLanguage: language
         )
     }
 
@@ -108,15 +175,65 @@ final class TextDocument: NSDocument {
         // here so the watcher callback (delivered asynchronously on the main
         // queue) sees the new stat and swallows it.
         refreshWatchState()
+        if openOptions.isScratch, scratchOriginalURL != url.standardizedFileURL {
+            // Save As moved the document off its stdin temp file: keep the new
+            // file, drop the scratch original.
+            removeScratchOriginal()
+        }
+        waitSavedPath = url.path
+        updateWaitStatus(state: "saved", path: url.path)
     }
 
     override func close() {
         watcher?.stop()
         LanguageServerPool.shared.documentClosed(fileURL: fileURL)
+        if let fileURL, !openOptions.isScratch, !AppDelegate.isTerminating {
+            ReopenStore.shared.record(fileURL: fileURL)
+        }
+        updateWaitStatus(
+            state: "closed",
+            path: openOptions.isScratch ? waitSavedPath : fileURL?.path
+        )
+        removeScratchOriginal()
         super.close()
     }
 
+    private func updateWaitStatus(state: String, path: String? = nil) {
+        guard let waitStatusURL else { return }
+        WaitStatusWriter.write(
+            state: state,
+            path: path ?? fileURL?.path,
+            to: waitStatusURL
+        )
+    }
+
+    private func removeScratchOriginal() {
+        guard openOptions.isScratch, let scratchOriginalURL else { return }
+        // Whether it was discarded, saved in place, or saved elsewhere, the
+        // stdin temp is the shim's artifact and is removed on close.
+        try? FileManager.default.removeItem(at: scratchOriginalURL)
+        self.scratchOriginalURL = nil
+    }
+
     // MARK: - Text flow with the window controller
+
+    /// Set per-open options for a document that was not created through the
+    /// URL-read path (an untitled/scratch document, or a re-open of an
+    /// already-live document). Does not re-read file content.
+    func applyOpenOptions(_ options: OpenDocumentOptions) {
+        openOptions = options
+        if options.isScratch, let fileURL {
+            scratchOriginalURL = fileURL.standardizedFileURL
+        }
+        if fileURL != nil {
+            refreshWatchState()
+        }
+        updateWaitStatus(state: "open")
+    }
+
+    func applyInitialSelection(_ selection: TextSelection?) {
+        initialSelection = selection
+    }
 
     /// Called by the window controller after each user edit: mirrors the text
     /// into the document and bumps the standard change count (dirty state).
@@ -208,7 +325,7 @@ final class TextDocument: NSDocument {
     private func reloadFromDisk() throws {
         guard let fileURL,
               let data = try? Data(contentsOf: fileURL),
-              let newText = Self.decode(data)
+              let newText = Self.decode(data, encodingName: openOptions.encoding)
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
@@ -222,6 +339,11 @@ final class TextDocument: NSDocument {
     /// leaves the previous DispatchSource pointed at an unlinked inode.
     private func refreshWatchState() {
         guard let fileURL else { return }
+        guard openOptions.watchesFile else {
+            watcher?.stop()
+            watcher = nil
+            return
+        }
         lastKnownFileStat = FileStat(url: fileURL)
         // Keep NSDocument's save-time conflict check in lockstep with what
         // this document has already seen, including the load itself (the
@@ -229,7 +351,10 @@ final class TextDocument: NSDocument {
         // normally stamp this).
         fileModificationDate = lastKnownFileStat?.modificationDate
         if watcher == nil {
-            watcher = FileChangeWatcher(path: fileURL.path) { [weak self] in
+            watcher = FileChangeWatcher(
+                path: fileURL.path,
+                debounceInterval: TimeInterval(openOptions.watchDebounceMilliseconds) / 1000
+            ) { [weak self] in
                 self?.externalFileChanged()
             }
         }
@@ -256,7 +381,28 @@ final class TextDocument: NSDocument {
         }
     }
 
-    private static func decode(_ data: Data) -> String? {
-        String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    private static func decode(_ data: Data, encodingName: String?) -> String? {
+        if let encodingName {
+            guard let encoding = OpenTextEncoding.stringEncoding(forName: encodingName) else {
+                return nil
+            }
+            return String(data: data, encoding: encoding)
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    /// Normalize every newline spelling to `\n`, then (when asked) emit the
+    /// requested line ending. Doing this on save keeps `--eol` independent of
+    /// whatever mixture the file arrived with.
+    private static func normalizedLineEndings(_ string: String, to lineEnding: OpenLineEnding) -> String {
+        let lf = string
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        switch lineEnding {
+        case .lf:
+            return lf
+        case .crlf:
+            return lf.replacingOccurrences(of: "\n", with: "\r\n")
+        }
     }
 }

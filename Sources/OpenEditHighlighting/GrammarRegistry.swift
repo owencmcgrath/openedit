@@ -59,6 +59,27 @@ public struct GrammarRegistry: Sendable {
         self.init(queriesDirectoryProvider: { GrammarRegistry.defaultQueriesDirectory(forBundleName: $0) })
     }
 
+    /// CLI `--grammar-dir` override (ARCHITECTURE.md 5.1): look for an
+    /// unpacked grammar under the given root, either as
+    /// `<root>/<bundleName>` directly holding `highlights.scm`, or as the same
+    /// `<bundleName>.bundle/Contents/Resources/queries` layout the app ships.
+    public init(queriesRootDirectory root: URL) {
+        self.init(queriesDirectoryProvider: { bundleName in
+            let manager = FileManager.default
+            let candidates = [
+                root.appendingPathComponent(bundleName, isDirectory: true),
+                root
+                    .appendingPathComponent("\(bundleName).bundle", isDirectory: true)
+                    .appendingPathComponent("Contents", isDirectory: true)
+                    .appendingPathComponent("Resources", isDirectory: true)
+                    .appendingPathComponent("queries", isDirectory: true),
+            ]
+            return candidates.first {
+                manager.fileExists(atPath: $0.appendingPathComponent("highlights.scm").path)
+            }
+        })
+    }
+
     /// Test seam: let a caller point at an explicit queries directory instead of
     /// the SPM resource-bundle layout. The provider returns the directory that
     /// holds `highlights.scm` for a given bundle name, or `nil` if not found.

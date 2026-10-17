@@ -36,6 +36,25 @@ public protocol ServerTransport: AnyObject {
 /// that owns the frame decoder, and complete messages hop to the main actor,
 /// preserving byte order throughout.
 public final class ProcessTransport: ServerTransport {
+    /// Optional per-session stderr sink for `--lsp-log` (ARCHITECTURE.md 5.1).
+    /// One shared server process per language means the newest CLI request
+    /// wins; the file is append-only.
+    nonisolated public static var stderrLogURL: URL? {
+        get {
+            stderrLogLock.lock()
+            defer { stderrLogLock.unlock() }
+            return _stderrLogURL
+        }
+        set {
+            stderrLogLock.lock()
+            _stderrLogURL = newValue
+            stderrLogLock.unlock()
+        }
+    }
+
+    nonisolated private static let stderrLogLock = NSLock()
+    nonisolated(unsafe) private static var _stderrLogURL: URL?
+
     private let executablePath: String
     private let arguments: [String]
     private let environment: [String: String]?
@@ -69,6 +88,20 @@ public final class ProcessTransport: ServerTransport {
         }
         decoder.onMalformed = { [weak self] reason in
             self?.close(with: LSPError.protocolError("malformed framing: \(reason)"))
+        }
+    }
+
+    nonisolated private static func appendStderr(_ text: String) {
+        guard let url = stderrLogURL, let data = text.data(using: .utf8) else { return }
+        stderrLogLock.lock()
+        defer { stderrLogLock.unlock() }
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
         }
     }
 
@@ -106,6 +139,7 @@ public final class ProcessTransport: ServerTransport {
                 self?.stderrBuffer.append(chunk)
                 if let stderr = String(data: chunk, encoding: .utf8) {
                     NSLog("OpenEdit LSP stderr: %@", stderr)
+                    Self.appendStderr(stderr)
                 }
             }
         }

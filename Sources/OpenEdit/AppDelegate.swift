@@ -1,5 +1,6 @@
 import AppKit
 import OpenEditLSP
+import OpenEditLog
 import OpenEditWindowing
 
 /// NSDocumentController subclass that owns document placement and the
@@ -43,6 +44,9 @@ final class OpenEditDocumentController: NSDocumentController {
         // frontmost. A new-window intent always resolves to a new window, so
         // skip the window scan the router would discard anyway.
         let reuseTarget = intent == .newWindow ? nil : DocumentPlacement.reuseTarget(for: intent)
+        let canonicalURL = url.standardizedFileURL
+        let pendingOptions = TextDocument.pendingOpenOptions[canonicalURL]
+        let pendingSelection = TextDocument.pendingOpenSelections[canonicalURL]
 
         super.openDocument(
             withContentsOf: url,
@@ -50,6 +54,19 @@ final class OpenEditDocumentController: NSDocumentController {
         ) { document, documentWasAlreadyOpen, error in
             if document != nil {
                 TextDocument.settleLaunchedUntitledDocuments()
+            }
+            if let textDocument = document as? TextDocument {
+                // A re-open does not call `read`, so apply the options and
+                // selection that the read path would otherwise have consumed
+                // (ARCHITECTURE.md 5.1).
+                if let pendingOptions {
+                    textDocument.applyOpenOptions(pendingOptions)
+                    TextDocument.pendingOpenOptions.removeValue(forKey: canonicalURL)
+                }
+                if let pendingSelection {
+                    textDocument.applyInitialSelection(pendingSelection)
+                    TextDocument.pendingOpenSelections.removeValue(forKey: canonicalURL)
+                }
             }
             if let document, error == nil {
                 if document.windowControllers.isEmpty {
@@ -61,8 +78,14 @@ final class OpenEditDocumentController: NSDocumentController {
                         controller.showWindow(nil)
                         controller.window?.makeKeyAndOrderFront(nil)
                     } else {
-                        DocumentPlacement.present(controller, intent: intent, reusing: reuseTarget)
+                        DocumentPlacement.present(
+                            controller,
+                            intent: intent,
+                            reusing: reuseTarget,
+                            activate: !(pendingOptions?.background ?? false)
+                        )
                     }
+                    (controller as? DocumentWindowController)?.applyInitialSelection()
                 }
             }
             completionHandlerForDocuments(document, documentWasAlreadyOpen, error)
@@ -71,8 +94,13 @@ final class OpenEditDocumentController: NSDocumentController {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// True once AppKit is tearing the process down; closing documents during
+    /// quit must not pollute the `--reopen` stack.
+    static var isTerminating = false
+
     private var hasFinishedLaunching = false
     private var pendingOpenURLs: [URL] = []
+    private var launchRequestsBackground = false
 
     /// #8's single Settings window, created on first use.
     private var settingsWindowController: SettingsWindowController?
@@ -98,6 +126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Match the Dock/app-switcher icon to the system light/dark appearance.
         appIcon.start()
 
+        // Remove stdin/wait artifacts left behind by a crashed shim or app
+        // (ARCHITECTURE.md 5.1).
+        sweepStaleTempFiles()
+
         // Track document-window open/close to toggle the Dock icon
         // (ARCHITECTURE.md 5.13).
         dockPresence.start()
@@ -114,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MissingLSPServerNotification.shared.start()
 
         for url in launchArgumentURLs() {
-            openFile(at: url, intent: .reuseExistingWindow)
+            openFile(at: url, intent: .reuseExistingWindow, options: OpenDocumentOptions())
         }
         for url in pendingOpenURLs {
             handleOpenURL(url)
@@ -127,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !hasDocumentTypes, NSDocumentController.shared.documents.isEmpty {
             DispatchQueue.main.async { [weak self] in
                 guard let self, NSDocumentController.shared.documents.isEmpty else { return }
-                self.openFile(at: nil, intent: .reuseExistingWindow)
+                self.openFile(at: nil, intent: .reuseExistingWindow, options: OpenDocumentOptions())
             }
         }
 
@@ -135,7 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // arriving later (Open Documents Apple Events, slow mounts) settle the
         // launch-created Untitled themselves via
         // TextDocument.settleLaunchedUntitledDocuments().
-        NSApp.activate(ignoringOtherApps: true)
+        if !launchRequestsBackground {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     /// Backstop for the Untitled fallback in case activation is delayed; the
@@ -147,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// with it the Dock icon — until the user opens a file.
     func applicationDidBecomeActive(_ notification: Notification) {
         if !hasDocumentTypes, !dockPresence.isHidden, NSDocumentController.shared.documents.isEmpty {
-            openFile(at: nil, intent: .reuseExistingWindow)
+            openFile(at: nil, intent: .reuseExistingWindow, options: OpenDocumentOptions())
         }
     }
 
@@ -164,14 +198,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// is a plain file open, which defaults to reusing the frontmost window.
     private func handleOpenURL(_ url: URL) {
         if let request = OpenURLInterpreter.interpret(url) {
-            for fileURL in request.fileURLs {
-                openFile(at: fileURL, intent: request.intent)
+            configureLogging(from: request.options)
+            if request.action == .reopen {
+                if let url = ReopenStore.shared.popLastClosed() {
+                    openFile(at: url, intent: request.intent, options: request.options)
+                }
+                return
+            }
+            if request.targets.isEmpty, request.options.isScratch {
+                openFile(at: nil, intent: request.intent, options: request.options)
+                return
+            }
+            for target in request.targets {
+                openFile(
+                    at: target.fileURL,
+                    intent: request.intent,
+                    options: request.options,
+                    selection: target.selection
+                )
             }
         } else if url.scheme?.lowercased() != OpenURLScheme.scheme {
             // A plain file URL defaults to reusing the frontmost window. A
             // recognized-but-unparseable `openedit://` URL is ignored rather
             // than treated as a file, which would surface a bogus "not found".
-            openFile(at: url, intent: .reuseExistingWindow)
+            openFile(at: url, intent: .reuseExistingWindow, options: OpenDocumentOptions())
+        }
+    }
+
+    /// Apply `--log-level`/`--log-file`/`--debug` to the process logger; the
+    /// newest CLI invocation wins (ARCHITECTURE.md 5.1).
+    private func configureLogging(from options: OpenDocumentOptions) {
+        if options.background {
+            launchRequestsBackground = true
+        }
+        var level: OpenEditLogLevel?
+        if options.debug {
+            level = .debug
+        } else if let name = options.logLevel, let parsed = OpenEditLogLevel(name: name) {
+            level = parsed
+        }
+        let fileURL = options.logFilePath.map { URL(fileURLWithPath: $0) }
+        if level != nil || fileURL != nil {
+            OpenEditLog.shared.configure(level: level, fileURL: fileURL)
         }
     }
 
@@ -198,6 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        Self.isTerminating = true
         // Ask every live language server to shut down (ARCHITECTURE.md 5.5);
         // `shutdownAndExit` closes the process handles itself, so a slow or
         // unresponsive server cannot keep the app alive.
@@ -206,16 +275,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - File opening
 
-    private func openFile(at url: URL?, intent: OpenIntent) {
+    private func openFile(
+        at url: URL?,
+        intent: OpenIntent,
+        options: OpenDocumentOptions,
+        selection: TextSelection? = nil
+    ) {
         if hasDocumentTypes {
             // Bundled app: NSDocumentController owns the open flow (including
             // odoc file-open Apple Events, which reach
             // `OpenEditDocumentController.openDocument`, the placement seam).
-            // Record the intent for that override, then open; it decides
-            // reuse-vs-new-window and presents the document (ARCHITECTURE.md
-            // 5.1).
+            // Record the intent and per-open options for that override, then
+            // open; it decides reuse-vs-new-window and presents the document
+            // (ARCHITECTURE.md 5.1).
             if let canonicalURL = url?.resolvingSymlinksInPath() {
                 OpenEditDocumentController.pendingIntent = intent
+                TextDocument.pendingOpenOptions[canonicalURL.standardizedFileURL] = options
+                if let selection {
+                    TextDocument.pendingOpenSelections[canonicalURL.standardizedFileURL] = selection
+                }
                 NSDocumentController.shared.openDocument(
                     withContentsOf: canonicalURL,
                     display: true,
@@ -225,6 +303,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                 )
+            } else if options.isScratch {
+                openScratchDocument(intent: intent, options: options)
             } else {
                 do {
                     _ = try NSDocumentController.shared.openUntitledDocumentAndDisplay(true)
@@ -249,24 +329,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        createManualDocument(at: canonicalURL, intent: intent)
+        createManualDocument(at: canonicalURL, intent: intent, options: options, selection: selection)
     }
 
-    private func createManualDocument(at canonicalURL: URL?, intent: OpenIntent) {
+    /// A deliberate CLI scratch buffer in the bundled app. Unlike the
+    /// launch-created Untitled document, it is not a launch artifact and must
+    /// survive the first real file open.
+    private func openScratchDocument(intent: OpenIntent, options: OpenDocumentOptions) {
+        do {
+            let document = try NSDocumentController.shared.openUntitledDocumentAndDisplay(false)
+            guard let textDocument = document as? TextDocument else { return }
+            textDocument.wasLaunchedUntitled = false
+            textDocument.applyOpenOptions(options)
+            if document.windowControllers.isEmpty {
+                document.makeWindowControllers()
+            }
+            guard let controller = document.windowControllers.first else {
+                document.showWindows()
+                return
+            }
+            let reuseTarget = intent == .newWindow ? nil : DocumentPlacement.reuseTarget(for: intent)
+            DocumentPlacement.present(
+                controller,
+                intent: intent,
+                reusing: reuseTarget,
+                activate: !options.background
+            )
+        } catch {
+            NSDocumentController.shared.presentError(error)
+        }
+    }
+
+    private func createManualDocument(
+        at canonicalURL: URL?,
+        intent: OpenIntent,
+        options: OpenDocumentOptions,
+        selection: TextSelection?
+    ) {
         do {
             let reuseTarget = intent == .newWindow ? nil : DocumentPlacement.reuseTarget(for: intent)
-            let newDocument = try canonicalURL.map { try TextDocument(fileAt: $0) } ?? TextDocument()
+            let newDocument: TextDocument
+            if let canonicalURL {
+                TextDocument.pendingOpenOptions[canonicalURL.standardizedFileURL] = options
+                if let selection {
+                    TextDocument.pendingOpenSelections[canonicalURL.standardizedFileURL] = selection
+                }
+                newDocument = try TextDocument(fileAt: canonicalURL)
+            } else {
+                newDocument = TextDocument()
+                newDocument.applyOpenOptions(options)
+            }
             NSDocumentController.shared.addDocument(newDocument)
             newDocument.makeWindowControllers()
             if let controller = newDocument.windowControllers.first {
-                DocumentPlacement.present(controller, intent: intent, reusing: reuseTarget)
+                DocumentPlacement.present(
+                    controller,
+                    intent: intent,
+                    reusing: reuseTarget,
+                    activate: !options.background
+                )
             } else {
                 newDocument.showWindows()
             }
             if canonicalURL == nil {
                 // Same launch-settle flagging the bundled
-                // OpenEditDocumentController applies to the Untitled fallback.
-                newDocument.wasLaunchedUntitled = true
+                // OpenEditDocumentController applies to the Untitled fallback,
+                // except for a deliberate CLI scratch buffer.
+                newDocument.wasLaunchedUntitled = !options.isScratch
             } else {
                 // A newly arrived file document settles any launch-created
                 // empty Untitled documents.
@@ -279,6 +408,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hasDocumentTypes: Bool {
         Bundle.main.infoDictionary?["CFBundleDocumentTypes"] != nil
+    }
+
+    /// Drop old `openedit-stdin-*` / `openedit-wait-*` files from $TMPDIR. Only
+    /// stale artifacts are removed; a live CLI wait (or a document opened
+    /// minutes ago) keeps its file.
+    private func sweepStaleTempFiles() {
+        let manager = FileManager.default
+        guard let entries = try? manager.contentsOfDirectory(
+            at: manager.temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        for entry in entries {
+            let name = entry.lastPathComponent
+            guard name.hasPrefix("openedit-stdin-") || name.hasPrefix("openedit-wait-") else {
+                continue
+            }
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            if let modified, modified > cutoff { continue }
+            try? manager.removeItem(at: entry)
+        }
     }
 
     /// File paths supplied as launch arguments (e.g. `swift run OpenEdit <path>`

@@ -57,21 +57,27 @@ public final class LSPProcessPool {
     public func documentOpened(
         fileURL: URL?,
         initialText: String,
-        availability: LanguageServerAvailability
+        availability: LanguageServerAvailability,
+        languageID explicitLanguageID: String? = nil,
+        resolvedLanguage: ResolvedLanguage? = nil
     ) {
         guard let fileURL,
-              let language = languageResolver(fileURL),
+              let language = resolvedLanguage ?? languageResolver(fileURL),
               case let .available(executablePath) = availability
         else { return }
 
         let uri = FileURI.make(from: fileURL)
         guard let uri, documents[uri] == nil else { return }
 
-        documents[uri] = PoolDocument(languageID: language.languageID, version: 1)
+        // A per-document CLI config snapshot can resolve a different language
+        // ID than the process-wide registry, so the caller may supply it
+        // explicitly (ARCHITECTURE.md 5.1, #46).
+        let languageID = explicitLanguageID ?? language.languageID
+        documents[uri] = PoolDocument(languageID: languageID, version: 1)
         unlaunchedEdits[uri] = initialText
 
         Task { [weak self] in
-            await self?.openDocument(uri: uri, languageID: language.languageID, executablePath: executablePath)
+            await self?.openDocument(uri: uri, languageID: languageID, executablePath: executablePath)
         }
     }
 

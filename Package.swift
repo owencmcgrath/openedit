@@ -103,9 +103,16 @@ let package = Package(
             name: "OpenEditWindowing",
             path: "Sources/OpenEditWindowing"
         ),
+        // Small logging seam for the CLI's `--log-level`/`--log-file`/`--debug`
+        // flags (ARCHITECTURE.md 5.1). OSLog always; an optional append-only
+        // file sink when the user asks for one.
+        .target(
+            name: "OpenEditLog",
+            path: "Sources/OpenEditLog"
+        ),
         .executableTarget(
             name: "OpenEdit",
-            dependencies: ["OpenEditConfig", "OpenEditHighlighting", "OpenEditLSP", "OpenEditWindowing"],
+            dependencies: ["OpenEditConfig", "OpenEditHighlighting", "OpenEditLSP", "OpenEditWindowing", "OpenEditLog"],
             path: "Sources/OpenEdit",
             linkerSettings: [
                 .unsafeFlags([
