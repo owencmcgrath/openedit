@@ -46,7 +46,7 @@ public final class TreeSitterHighlighter {
         grammarName: String?,
         fileExtension: String? = nil,
         registry: GrammarRegistry = .shared,
-        theme: SyntaxTheme = .system
+        theme: SyntaxTheme = .github
     ) {
         guard let grammarName else {
             self.init(diagnostic: .noLanguageMapping(fileExtension: fileExtension), theme: theme)
@@ -63,7 +63,7 @@ public final class TreeSitterHighlighter {
 
     /// A highlighter bound to an already-resolved grammar. `LanguageConfiguration`
     /// can be built from an explicit queries directory, which tests use.
-    public init(configuration: LanguageConfiguration, theme: SyntaxTheme = .system) {
+    public init(configuration: LanguageConfiguration, theme: SyntaxTheme = .github) {
         self.configuration = configuration
         self.theme = theme
         do {
@@ -77,7 +77,7 @@ public final class TreeSitterHighlighter {
     }
 
     /// An inactive highlighter that leaves text plain and records why.
-    public init(diagnostic: HighlightingDiagnostic, theme: SyntaxTheme = .system) {
+    public init(diagnostic: HighlightingDiagnostic, theme: SyntaxTheme = .github) {
         self.configuration = nil
         self.theme = theme
         self.diagnostic = diagnostic
@@ -164,7 +164,7 @@ public final class TreeSitterHighlighter {
         // syntax color (or text typed with an inherited color) does not keep a
         // stale one, then paint the captures in match order (less specific
         // first, more specific last — SwiftTreeSitter sorts them that way).
-        storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: clampedRange)
+        storage.addAttribute(.foregroundColor, value: theme.foreground, range: clampedRange)
         for namedRange in namedRanges {
             let colorRange = NSIntersectionRange(namedRange.range, clampedRange)
             guard colorRange.length > 0,

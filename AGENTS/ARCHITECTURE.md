@@ -145,9 +145,9 @@ These are the seams between components — pin these down precisely since they l
 
 ### 5.8 Appearance / Theming
 
-**[Decided]** No custom theme engine, no user-selectable color schemes in v1 — the app follows system light/dark appearance everywhere, full stop, in service of feeling as much like a native macOS app as possible. Concretely: syntax highlighting maps tree-sitter token types to AppKit's *dynamic* system colors (`NSColor.labelColor`, `.systemBlue`, `.systemGreen`, `.systemPurple`, `.secondaryLabelColor`, etc.) rather than hardcoded hex values — dynamic colors automatically resolve to the right value for the current appearance, so highlighting adapts to Dark Mode with zero extra code. Window chrome, the gutter, and diagnostics coloring (5.9) follow the same rule.
+**[Decided]** No custom theme engine, no user-selectable color schemes in v1 — the app follows system light/dark appearance everywhere, full stop. The editor's palette is **GitHub's**: the Light Default + Dark Default token set of `primer/github-vscode-theme` (6.3.5, built from `@primer/primitives` 7.10.0), the same theme GitHub ships for VS Code. Concretely: syntax highlighting maps tree-sitter token types to the theme's token colors (`GitHubPalette` — keyword red, string deep blue, function purple, type/variable orange, …), and the editor surface uses the theme's `editor.*` colors — background `#ffffff`/`#0d1117`, foreground `#1f2328`/`#e6edf3`, blue caret and 20%-alpha blue selection, and the gutter's muted/active line numbers. All of them are *dynamic* `NSColor`s (`NSColor(name:dynamicProvider:)` carrying the light and dark hex), the same mechanism the previous system-color mapping used, so highlighting adapts to Dark Mode with zero extra code; the exact hex values are pinned per appearance in `OpenEditHighlighting`'s tests. Non-editor window chrome keeps AppKit's system semantic colors, and diagnostics coloring (5.9) stays on system colors (red/orange/blue squiggles) per 5.9.
 
-**[Decided]** Standard, unmodified `NSWindow` title-bar chrome — no custom-drawn traffic lights, no `titlebarAppearsTransparent` tricks. This means OS-level window-chrome redesigns (e.g. macOS 27's Liquid Glass traffic light buttons) are inherited automatically with zero app-side code, in both AppKit and SwiftUI, since both sit on the same underlying `NSWindow`. Custom traffic lights would trade that free upkeep for a copy the app has to maintain and re-match every time Apple changes the design. Window chrome, the gutter, and diagnostics coloring (5.9) follow the same rule.
+**[Decided]** Standard, unmodified `NSWindow` title-bar chrome — no custom-drawn traffic lights, no `titlebarAppearsTransparent` tricks. This means OS-level window-chrome redesigns (e.g. macOS 27's Liquid Glass traffic light buttons) are inherited automatically with zero app-side code, in both AppKit and SwiftUI, since both sit on the same underlying `NSWindow`. Custom traffic lights would trade that free upkeep for a copy the app has to maintain and re-match every time Apple changes the design. Window chrome and diagnostics coloring (5.9) follow the same rule; the editor surface (5.7's gutter included) is the one themed exception, using the GitHub palette above.
 
 ### 5.9 Diagnostics
 
@@ -209,7 +209,7 @@ Each numbered item is a candidate for its own task spec (separate file), scoped 
 2. `openedit` CLI shell wrapper; confirm `open -na` reuses the running instance and brings existing-file windows forward
 3. File watcher + reload/conflict prompt (5.3), explicit Cmd-S save only (5.11)
 4. Config loader (5.2) — TOML, implement schema + bundled defaults
-5. Tree-sitter highlighting keyed off the config's grammar mapping, using dynamic system colors (5.4, 5.8)
+5. Tree-sitter highlighting keyed off the config's grammar mapping, using the GitHub theme's dynamic colors (5.4, 5.8)
 6. LSP process pool with idle-linger (5.5) + full-document sync + diagnostics rendering (5.9) + hover
 7. Missing-LSP detection (PATH check) + native notification with install command (5.6)
 8. Settings window — per-language notification dismissal reset, at minimum

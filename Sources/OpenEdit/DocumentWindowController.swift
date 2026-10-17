@@ -88,6 +88,18 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         scrollView.borderType = .noBorder
         scrollView.autohidesScrollers = true
 
+        // GitHub editor surface (ARCHITECTURE.md 5.8): the theme's canvas,
+        // foreground, caret, and selection replace the AppKit defaults, so a
+        // document window reads like GitHub's own editor in both appearances.
+        editorTextView.backgroundColor = GitHubPalette.editorBackground
+        editorTextView.textColor = GitHubPalette.foreground
+        editorTextView.insertionPointColor = GitHubPalette.cursor
+        editorTextView.selectedTextAttributes = [
+            .backgroundColor: GitHubPalette.selection
+        ]
+        scrollView.backgroundColor = GitHubPalette.editorBackground
+        scrollView.drawsBackground = true
+
         lineNumberRuler = LineNumberRulerView(textView: editorTextView, scrollView: scrollView)
         scrollView.verticalRulerView = lineNumberRuler
         scrollView.hasVerticalRuler = true

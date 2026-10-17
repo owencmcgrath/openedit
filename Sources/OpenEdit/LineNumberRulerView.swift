@@ -1,8 +1,12 @@
 import AppKit
+import OpenEditHighlighting
 
 /// Line-number gutter, implemented as an NSRulerView attached to the scroll
 /// view's vertical ruler so AppKit tracks the text view's line-fragment
-/// geometry automatically. See ARCHITECTURE.md 5.7.
+/// geometry automatically. See ARCHITECTURE.md 5.7. Colors follow the GitHub
+/// editor palette (5.8): muted numbers in `editorLineNumber.foreground`, with
+/// the selection's lines in `editorLineNumber.activeForeground`, on the
+/// theme's editor background.
 final class LineNumberRulerView: NSRulerView {
     private weak var textView: NSTextView?
     private let horizontalPadding: CGFloat = 6
@@ -52,10 +56,8 @@ final class LineNumberRulerView: NSRulerView {
 
         ensureLineStarts()
 
-        NSColor.textBackgroundColor.setFill()
+        GitHubPalette.editorBackground.setFill()
         bounds.fill()
-
-        drawTrailingSeparator()
 
         let containerOrigin = textView.textContainerOrigin
         let visibleRect = scrollView.documentVisibleRect
@@ -64,11 +66,20 @@ final class LineNumberRulerView: NSRulerView {
 
         let string = textView.string as NSString
         let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        let attributes: [NSAttributedString.Key: Any] = [
+        let baseAttributes: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: NSColor.secondaryLabelColor
+            .foregroundColor: GitHubPalette.lineNumber
         ]
-        let digitAdvance = ("0" as NSString).size(withAttributes: attributes).width
+        let activeAttributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: GitHubPalette.lineNumberActive
+        ]
+        let digitAdvance = ("0" as NSString).size(withAttributes: baseAttributes).width
+
+        // Lines the selection touches draw their number in the active color,
+        // like GitHub's editor. The selection already triggers a redraw via
+        // the didChangeSelection observation in init.
+        let activeLines = selectedLineNumberRanges(of: textView, string: string)
 
         let relativeOriginY = convert(NSPoint.zero, from: textView).y + containerOrigin.y
 
@@ -78,12 +89,13 @@ final class LineNumberRulerView: NSRulerView {
                 // Wrapped continuation of a previous line: no number.
                 return
             }
+            let line = self.lineNumber(forCharacterIndex: characterIndex)
             self.draw(
-                lineNumber: self.lineNumber(forCharacterIndex: characterIndex),
+                lineNumber: line,
                 atFragmentMinY: fragmentRect.minY,
                 relativeOriginY: relativeOriginY,
                 digitAdvance: digitAdvance,
-                attributes: attributes
+                attributes: activeLines.contains { $0.contains(line) } ? activeAttributes : baseAttributes
             )
         }
 
@@ -94,12 +106,13 @@ final class LineNumberRulerView: NSRulerView {
         if layoutManager.extraLineFragmentTextContainer === textContainer,
            !extraRect.isEmpty,
            visibleRect.intersects(extraRect) {
+            let line = lineNumber(forCharacterIndex: string.length)
             draw(
-                lineNumber: lineNumber(forCharacterIndex: string.length),
+                lineNumber: line,
                 atFragmentMinY: extraRect.minY,
                 relativeOriginY: relativeOriginY,
                 digitAdvance: digitAdvance,
-                attributes: attributes
+                attributes: activeLines.contains { $0.contains(line) } ? activeAttributes : baseAttributes
             )
         }
     }
@@ -145,13 +158,25 @@ final class LineNumberRulerView: NSRulerView {
         label.draw(at: point, withAttributes: attributes)
     }
 
-    private func drawTrailingSeparator() {
-        NSColor.separatorColor.setStroke()
-        let separator = NSBezierPath()
-        separator.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY))
-        separator.line(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.maxY))
-        separator.lineWidth = 1
-        separator.stroke()
+    /// The 1-based line ranges the text view's selections touch: an empty
+    /// selection covers its caret's line, a range covers every line it spans.
+    /// The line of the range's final character is included, so selecting
+    /// through a line's newline lights that line too.
+    private func selectedLineNumberRanges(
+        of textView: NSTextView,
+        string: NSString
+    ) -> [ClosedRange<Int>] {
+        let documentLength = string.length
+        return textView.selectedRanges.map { selection in
+            let clamped = NSIntersectionRange(
+                selection.rangeValue,
+                NSRange(location: 0, length: documentLength)
+            )
+            let first = lineNumber(forCharacterIndex: clamped.location)
+            guard clamped.length > 0 else { return first...first }
+            let lastCharacter = clamped.upperBound - 1
+            return first...lineNumber(forCharacterIndex: lastCharacter)
+        }
     }
 
     /// Widens the gutter when the file crosses a power-of-ten line count.
