@@ -161,8 +161,10 @@ final class LineNumberRulerView: NSRulerView {
     /// The 1-based line ranges the text view's selections touch: an empty
     /// selection covers its caret's line, a range covers every line it spans.
     /// The line of the range's final character is included, so selecting
-    /// through a line's newline lights that line too.
-    private func selectedLineNumberRanges(
+    /// through a line's newline lights that line too. Internal so the
+    /// windowing regression tests can assert the active ranges a draw would
+    /// use, like `lineNumber(forCharacterIndex:)`.
+    func selectedLineNumberRanges(
         of textView: NSTextView,
         string: NSString
     ) -> [ClosedRange<Int>] {

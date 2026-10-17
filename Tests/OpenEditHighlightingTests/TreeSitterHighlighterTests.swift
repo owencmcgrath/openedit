@@ -317,6 +317,7 @@ import Testing
             ("keyword", 0xCF222E, 0xFF7B72), // scale.red[5] / red[3]
             ("string", 0x0A3069, 0xA5D6FF),  // scale.blue[8] / blue[1]
             ("number", 0x0550AE, 0x79C0FF),  // scale.blue[6] / blue[2]
+            ("type.builtin", 0x0550AE, 0x79C0FF), // `support`: builtin types ride the blue stop
             ("comment", 0x6E7781, 0x8B949E), // scale.gray[5] / gray[3]
             ("function", 0x8250DF, 0xD2A8FF),// scale.purple[5] / purple[2]
             ("type", 0x953800, 0xFFA657),    // scale.orange[6] / orange[2]

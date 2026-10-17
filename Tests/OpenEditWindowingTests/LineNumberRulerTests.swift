@@ -7,7 +7,8 @@ import Testing
 /// `LineNumberRulerView.init` while the text view was still empty, and a
 /// programmatic `NSTextView.string =` replacement posts no
 /// `NSText.didChangeNotification`, so every line numbered `1` until the first
-/// keystroke recomputed the cache.
+/// keystroke recomputed the cache. The active-line tests pin #47's review
+/// behavior: the selection's lines draw their number in the active color.
 @Suite @MainActor struct LineNumberRulerTests {
 
     @Test func gutterNumbersSequentiallyRightAfterOpen() throws {
@@ -64,6 +65,44 @@ import Testing
 
         let editedText = textView.string
         #expect(ruler.lineNumber(forCharacterIndex: Self.startOfLine(3, in: editedText)) == 4)
+    }
+
+    /// The selection's lines draw their number in the active color (#47): a
+    /// bare caret lights its line, and a range lights every line it spans.
+    @Test func gutterLightsTheSelectionsLines() throws {
+        let text = Self.text(lineCount: 5)
+        let document = try Self.document(withText: text)
+        let controller = DocumentWindowController(document: document)
+        let textView = try #require(try Self.scrollView(of: controller).documentView as? NSTextView)
+        let ruler = try Self.ruler(of: controller)
+        let string = text as NSString
+
+        // A bare caret lights only its own line.
+        textView.setSelectedRange(NSRange(location: Self.startOfLine(2, in: text), length: 0))
+        #expect(ruler.selectedLineNumberRanges(of: textView, string: string) == [3...3])
+
+        // A range lights every line it touches, first through last.
+        textView.setSelectedRange(NSRange(
+            location: Self.startOfLine(1, in: text),
+            length: Self.startOfLine(3, in: text) - Self.startOfLine(1, in: text) + 1
+        ))
+        #expect(ruler.selectedLineNumberRanges(of: textView, string: string) == [2...4])
+    }
+
+    /// The line of the selection's final character is lit: selecting exactly
+    /// line 2's trailing newline keeps line 2 active even though the next
+    /// character already sits on line 3 (#47 review).
+    @Test func gutterLightsTheLineAnEndingNewlineBelongsTo() throws {
+        let text = Self.text(lineCount: 5)
+        let document = try Self.document(withText: text)
+        let controller = DocumentWindowController(document: document)
+        let textView = try #require(try Self.scrollView(of: controller).documentView as? NSTextView)
+        let ruler = try Self.ruler(of: controller)
+        let string = text as NSString
+
+        let line2 = string.lineRange(for: NSRange(location: Self.startOfLine(1, in: text), length: 0))
+        textView.setSelectedRange(NSRange(location: NSMaxRange(line2) - 1, length: 1))
+        #expect(ruler.selectedLineNumberRanges(of: textView, string: string) == [2...2])
     }
 
     // MARK: - Helpers

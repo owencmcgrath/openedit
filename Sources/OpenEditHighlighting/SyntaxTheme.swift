@@ -44,7 +44,9 @@ public struct SyntaxTheme: Sendable {
             "string.special": { GitHubPalette.string },
             "escape": { GitHubPalette.keyword },
 
-            // `constant` — numbers, booleans, builtin constants
+            // `constant` (and `support`) — numbers, booleans, builtin
+            // constants; builtin types ride the theme's `support` selector,
+            // which resolves to the same blue stop.
             "number": { GitHubPalette.constant },
             "boolean": { GitHubPalette.constant },
 
@@ -60,11 +62,11 @@ public struct SyntaxTheme: Sendable {
 
             // `entity.name` (types, namespaces) and `variable` share the orange
             "type": { GitHubPalette.type },
-            "type.builtin": { GitHubPalette.type },
             "module": { GitHubPalette.type },
             "namespace": { GitHubPalette.type },
 
             "constant.builtin": { GitHubPalette.constant },
+            "type.builtin": { GitHubPalette.constant }, // `support`: int, str
             "variable.builtin": { GitHubPalette.constant }, // `variable.language`: self, this
             "variable": { GitHubPalette.type },
             "variable.parameter": { GitHubPalette.foreground }, // `variable.parameter.function`
