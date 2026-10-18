@@ -10,6 +10,20 @@ Instructions for any coding agent working in this repository.
 - Work one numbered task from the Build Sequence at a time. Don't implement functionality from a later task "while you're in there" — if you notice something a later task will need, note it in the PR description rather than building it now.
 - If a task's scope is ambiguous, or touches an `[Open]` item in `ARCHITECTURE.md`, ask rather than guessing — don't quietly resolve an open design question through an implementation choice.
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `owencmcgrath/openedit`, tracked on project #11. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, using default label names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context (`GLOSSARY.md` + `docs/adr/` at the repo root). See `docs/agents/domain.md`.
+
 ## Issue & Project Workflow
 
 Work is tracked as GitHub issues on `owencmcgrath/openedit`, grouped in the **openedit** project (GitHub Projects v2, owner `owencmcgrath`, project number `11`). The issue is the unit of work; a branch and a PR are the artifacts that resolve it. A chat request is not a work item by itself.
