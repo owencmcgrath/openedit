@@ -33,8 +33,15 @@ public final class LSPProcessPool {
     /// `DocumentLanguageMapping.resolvedLanguage(for:)`; tests inject fakes.
     private let languageResolver: @MainActor (URL?) -> ResolvedLanguage?
 
-    /// Builds a client (and thus its transport) for a resolved executable.
-    private let clientFactory: @MainActor (String) -> LanguageServerClient
+    /// Builds a client (and thus its transport) for a resolved executable. The
+    /// second parameter is the stderr sink for the spawned process, if the CLI
+    /// asked for one before this language's server came up.
+    private let clientFactory: @MainActor (String, URL?) -> LanguageServerClient
+
+    /// The most recent `--lsp-log` sink recorded per language. Read at spawn
+    /// time, so the process keeps that sink for its whole lifetime; a shared,
+    /// already-running server is never re-scoped (ARCHITECTURE.md 5.1).
+    private var stderrLogURLs: [String: URL] = [:]
 
     /// Server notifications for consumed features (diagnostics in #6
     /// Checkpoint B). First parameter: the language ID.
@@ -44,7 +51,7 @@ public final class LSPProcessPool {
 
     public init(
         languageResolver: @MainActor @escaping (URL?) -> ResolvedLanguage?,
-        clientFactory: @MainActor @escaping (String) -> LanguageServerClient
+        clientFactory: @MainActor @escaping (String, URL?) -> LanguageServerClient
     ) {
         self.languageResolver = languageResolver
         self.clientFactory = clientFactory
@@ -61,7 +68,8 @@ public final class LSPProcessPool {
         fileURL: URL?,
         initialText: String,
         availability: LanguageServerAvailability,
-        resolvedLanguage: ResolvedLanguage? = nil
+        resolvedLanguage: ResolvedLanguage? = nil,
+        stderrLogPath: String? = nil
     ) {
         guard let fileURL,
               let language = resolvedLanguage ?? languageResolver(fileURL),
@@ -72,6 +80,9 @@ public final class LSPProcessPool {
         guard let uri, documents[uri] == nil else { return }
 
         let languageID = language.languageID
+        if let stderrLogPath, !stderrLogPath.isEmpty {
+            stderrLogURLs[languageID] = URL(fileURLWithPath: stderrLogPath)
+        }
         documents[uri] = PoolDocument(languageID: languageID, version: 1)
         unlaunchedEdits[uri] = initialText
 
@@ -196,7 +207,7 @@ public final class LSPProcessPool {
             return client.isReady ? client : nil
         }
 
-        let client = clientFactory(executablePath)
+        let client = clientFactory(executablePath, stderrLogURLs[languageID])
         let languageID_ = languageID
         client.onTerminated = { [weak self] _ in
             self?.clientTerminated(languageID: languageID_)

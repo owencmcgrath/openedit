@@ -8,8 +8,13 @@ import OpenEditLSP
 enum LanguageServerPool {
     @MainActor static let shared = LSPProcessPool(
         languageResolver: { DocumentLanguageMapping.resolvedLanguage(for: $0) },
-        clientFactory: { executablePath in
-            LanguageServerClient(transport: ProcessTransport(executablePath: executablePath))
+        clientFactory: { executablePath, stderrLogURL in
+            LanguageServerClient(
+                transport: ProcessTransport(
+                    executablePath: executablePath,
+                    stderrLogURL: stderrLogURL
+                )
+            )
         }
     )
 }

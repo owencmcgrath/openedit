@@ -165,9 +165,6 @@ final class TextDocument: NSDocument {
               let language = DocumentLanguageMapping.lspLanguage(for: fileURL, options: openOptions)
         else { return }
 
-        if let lspLogPath = openOptions.lspLogPath {
-            ProcessTransport.stderrLogURL = URL(fileURLWithPath: lspLogPath)
-        }
         let availability = LanguageServerLocator.resolve(language: language)
         MissingLSPServerNotification.shared.handleDocumentOpen(
             language: language,
@@ -177,7 +174,8 @@ final class TextDocument: NSDocument {
             fileURL: fileURL,
             initialText: text,
             availability: availability,
-            resolvedLanguage: language
+            resolvedLanguage: language,
+            stderrLogPath: openOptions.lspLogPath
         )
     }
 
