@@ -30,6 +30,14 @@ A native macOS text editor, launched from the CLI (`openedit <file>`), that beha
 - Code signing and notarization (`codesign`, `xcrun notarytool`, `xcrun stapler`) are CLI tools bundled with Command Line Tools, not gated behind the full Xcode IDE — the Developer ID + notarization pipeline (Section 9, task 9) is unaffected by not having Xcode installed locally.
 - CI is not bound by this: GitHub Actions' macOS runners ship full Xcode pre-installed, so CI can use it if that's simplest there, independent of the local no-Xcode preference.
 
+### 3.2 Website
+
+- **[Decided]** Site code lives in a separate repo, `owencmcgrath/openedit-web` (private during build; public at launch), not this repo. Hosting is Vercel; `openedit.sh` (#43) points at the production deployment.
+- v1 pages: landing (including a qualitative comparison map), `/docs` for `~/.config/openedit/languages.toml`, and `/changelog` derived from GitHub Releases, plus 404, privacy, and terms. Docs stay in the site repo for v1.
+- **[Decided]** Hand-rolled static site with a zero-dependency `build.mjs`: no framework, webfonts, trackers, or third-party scripts. Dark-first adaptive appearance (system `prefers-color-scheme`); SF Mono for the brand voice and SF Pro for body copy.
+- Install CTAs resolve to the Homebrew tap (#10) and the latest signed/notarized DMG on GitHub Releases (#9). Until those exist, the DMG points at the Releases page and the brew command is a clearly-marked disabled placeholder. Public launch is gated by a `SITE_PUBLIC` env var and flips only when a real downloadable release exists.
+- Full decision set and acceptance criteria: issue #44.
+
 ## 4. Component Map
 
 | Component | Responsibility |
