@@ -1,6 +1,7 @@
 import AppKit
 import OpenEditHighlighting
 import OpenEditLSP
+import OpenEditWindowing
 
 /// Window for one open document: the text view, scroll view, and gutter, with
 /// user edits forwarded to the TextDocument for standard NSDocument dirty
@@ -33,6 +34,10 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
     /// Guard so programmatic text application (initial load, silent reload,
     /// reload from the conflict prompt) is not counted as a user edit.
     private var isApplyingDocumentText = false
+
+    /// The CLI jump/selection is applied once, on first show; later shows must
+    /// not steal the user's current selection.
+    private var hasAppliedInitialSelection = false
 
     /// Guard so attribute writes performed by the highlighter are not treated as
     /// user edits (they arrive as `didProcessEditing` with `.editedAttributes`).
@@ -88,6 +93,22 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         scrollView.borderType = .noBorder
         scrollView.autohidesScrollers = true
 
+        // Per-document CLI options (ARCHITECTURE.md 5.1, #46). Defaults leave
+        // AppKit's stock editing behavior untouched.
+        let options = document.openOptions
+        editorTextView.isEditable = !options.readOnly
+        if let wrapsLines = options.wrapsLines {
+            editorTextView.isHorizontallyResizable = !wrapsLines
+            textContainer.widthTracksTextView = wrapsLines
+            scrollView.hasHorizontalScroller = !wrapsLines
+        }
+        if let tabSize = options.tabSize, tabSize > 0 {
+            editorTextView.defaultParagraphStyle = Self.paragraphStyle(
+                tabSize: tabSize,
+                font: editorTextView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            )
+        }
+
         // GitHub editor surface (ARCHITECTURE.md 5.8): the theme's canvas,
         // foreground, caret, and selection replace the AppKit defaults, so a
         // document window reads like GitHub's own editor in both appearances.
@@ -112,14 +133,35 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
             defer: false
         )
         window.contentView = scrollView
-        window.center()
-        window.setFrameAutosaveName("OpenEditDocumentWindow")
+        if let size = document.openOptions.windowSize {
+            window.setContentSize(NSSize(width: size.width, height: size.height))
+        }
+        if let position = document.openOptions.windowPosition {
+            window.setFrameOrigin(NSPoint(x: position.x, y: position.y))
+        } else {
+            window.center()
+        }
+        if document.openOptions.windowSize == nil, document.openOptions.windowPosition == nil {
+            window.setFrameAutosaveName("OpenEditDocumentWindow")
+        }
         window.tabbingIdentifier = Self.tabbingIdentifier
         window.title = document.displayName
 
+        let grammarRegistry: GrammarRegistry
+        if let grammarDirectory = document.openOptions.grammarDirectory {
+            grammarRegistry = GrammarRegistry(
+                queriesRootDirectory: URL(fileURLWithPath: grammarDirectory)
+            )
+        } else {
+            grammarRegistry = .shared
+        }
         highlighter = TreeSitterHighlighter(
-            grammarName: DocumentLanguageMapping.grammarName(for: document.fileURL),
-            fileExtension: document.fileURL?.pathExtension
+            grammarName: DocumentLanguageMapping.grammarName(
+                for: document.fileURL,
+                options: document.openOptions
+            ),
+            fileExtension: document.fileURL?.pathExtension,
+            registry: grammarRegistry
         )
 
         super.init(window: window)
@@ -149,6 +191,48 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// Apply the CLI's initial jump/selection once the window exists. Safe to
+    /// call more than once; the document's initial selection is only consumed
+    /// on first show.
+    func applyInitialSelection() {
+        guard !hasAppliedInitialSelection,
+              let selection = textDocument?.initialSelection
+        else { return }
+        hasAppliedInitialSelection = true
+        let range = TextSelectionResolver.range(for: selection, in: textView.string)
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
+        window?.makeFirstResponder(textView)
+    }
+
+    private static func paragraphStyle(tabSize: Int, font: NSFont) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        let spaceWidth = (" " as NSString).size(withAttributes: [.font: font]).width
+        style.defaultTabInterval = spaceWidth * CGFloat(tabSize)
+        style.tabStops = []
+        return style
+    }
+
+    /// `--expand-tabs`: insert spaces to the next tab stop instead of a tab
+    /// character. Delegate return `true` means the command was handled.
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.insertTab(_:)),
+              textDocument?.openOptions.expandTabs == true
+        else { return false }
+
+        let tabSize = textDocument?.openOptions.tabSize ?? 4
+        let string = textView.string as NSString
+        let location = textView.selectedRange().location
+        let lineRange = string.lineRange(for: NSRange(location: location, length: 0))
+        let column = max(0, location - lineRange.location)
+        let spaces = tabSize - (column % tabSize)
+        textView.insertText(
+            String(repeating: " ", count: spaces),
+            replacementRange: textView.selectedRange()
+        )
+        return true
+    }
+
     /// Keep the title-bar proxy icon in step with the document's file URL.
     /// AppKit calls this whenever the document's display name or dirty state
     /// changes, which is exactly when Save As hands the document its `fileURL`.
@@ -176,6 +260,7 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         window?.makeFirstResponder(textView)
+        applyInitialSelection()
     }
 
     /// Push disk-derived text into the view, clearing undo history that would

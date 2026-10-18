@@ -1,5 +1,6 @@
 import Foundation
 import OpenEditConfig
+import OpenEditLog
 
 /// The app-facing half of the LSP client (ARCHITECTURE.md component map: LSP
 /// client spawns and owns a pool of language server processes). One
@@ -32,8 +33,15 @@ public final class LSPProcessPool {
     /// `DocumentLanguageMapping.resolvedLanguage(for:)`; tests inject fakes.
     private let languageResolver: @MainActor (URL?) -> ResolvedLanguage?
 
-    /// Builds a client (and thus its transport) for a resolved executable.
-    private let clientFactory: @MainActor (String) -> LanguageServerClient
+    /// Builds a client (and thus its transport) for a resolved executable. The
+    /// second parameter is the stderr sink for the spawned process, if the CLI
+    /// asked for one before this language's server came up.
+    private let clientFactory: @MainActor (String, URL?) -> LanguageServerClient
+
+    /// The most recent `--lsp-log` sink recorded per language. Read at spawn
+    /// time, so the process keeps that sink for its whole lifetime; a shared,
+    /// already-running server is never re-scoped (ARCHITECTURE.md 5.1).
+    private var stderrLogURLs: [String: URL] = [:]
 
     /// Server notifications for consumed features (diagnostics in #6
     /// Checkpoint B). First parameter: the language ID.
@@ -43,7 +51,7 @@ public final class LSPProcessPool {
 
     public init(
         languageResolver: @MainActor @escaping (URL?) -> ResolvedLanguage?,
-        clientFactory: @MainActor @escaping (String) -> LanguageServerClient
+        clientFactory: @MainActor @escaping (String, URL?) -> LanguageServerClient
     ) {
         self.languageResolver = languageResolver
         self.clientFactory = clientFactory
@@ -53,25 +61,33 @@ public final class LSPProcessPool {
 
     /// One document-open event. Consults the availability verdict already
     /// computed for this open (`.available` alone spawns); a `.missing` or
-    /// highlighting-only language never spawns a process here.
+    /// highlighting-only language never spawns a process here. The caller's
+    /// `resolvedLanguage` already carries the per-document CLI resolution
+    /// (config snapshot, `--lsp-language`), so its `languageID` is used as-is.
     public func documentOpened(
         fileURL: URL?,
         initialText: String,
-        availability: LanguageServerAvailability
+        availability: LanguageServerAvailability,
+        resolvedLanguage: ResolvedLanguage? = nil,
+        stderrLogPath: String? = nil
     ) {
         guard let fileURL,
-              let language = languageResolver(fileURL),
+              let language = resolvedLanguage ?? languageResolver(fileURL),
               case let .available(executablePath) = availability
         else { return }
 
         let uri = FileURI.make(from: fileURL)
         guard let uri, documents[uri] == nil else { return }
 
-        documents[uri] = PoolDocument(languageID: language.languageID, version: 1)
+        let languageID = language.languageID
+        if let stderrLogPath, !stderrLogPath.isEmpty {
+            stderrLogURLs[languageID] = URL(fileURLWithPath: stderrLogPath)
+        }
+        documents[uri] = PoolDocument(languageID: languageID, version: 1)
         unlaunchedEdits[uri] = initialText
 
         Task { [weak self] in
-            await self?.openDocument(uri: uri, languageID: language.languageID, executablePath: executablePath)
+            await self?.openDocument(uri: uri, languageID: languageID, executablePath: executablePath)
         }
     }
 
@@ -160,6 +176,10 @@ public final class LSPProcessPool {
         guard let client = await ensureLaunched(languageID: languageID, executablePath: executablePath) else {
             // Launch failed: this document (and any others of the language)
             // stay plain and editable; the next open event retries.
+            OpenEditLog.shared.error(
+                category: "lsp",
+                "language server failed to launch (language: \(languageID))"
+            )
             documents.removeValue(forKey: uri)
             unlaunchedEdits.removeValue(forKey: uri)
             return
@@ -187,7 +207,7 @@ public final class LSPProcessPool {
             return client.isReady ? client : nil
         }
 
-        let client = clientFactory(executablePath)
+        let client = clientFactory(executablePath, stderrLogURLs[languageID])
         let languageID_ = languageID
         client.onTerminated = { [weak self] _ in
             self?.clientTerminated(languageID: languageID_)
@@ -208,12 +228,20 @@ public final class LSPProcessPool {
             clients.removeValue(forKey: languageID)
             return nil
         }
+        OpenEditLog.shared.info(
+            category: "lsp",
+            "language server started (language: \(languageID))"
+        )
         return client
     }
 
     private func clientTerminated(languageID: String) {
         // Crashed or died: drop it. Its open documents keep editing without
         // LSP until reopened (recorded in ARCHITECTURE.md 5.5).
+        OpenEditLog.shared.warning(
+            category: "lsp",
+            "language server exited unexpectedly (language: \(languageID))"
+        )
         clients.removeValue(forKey: languageID)
         launchTasks.removeValue(forKey: languageID)
     }

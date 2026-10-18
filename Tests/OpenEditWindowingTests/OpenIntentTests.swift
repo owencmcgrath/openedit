@@ -65,6 +65,148 @@ import Testing
         #expect(OpenURLInterpreter.interpret(URL(fileURLWithPath: "/tmp/a.txt")) == nil)
         #expect(OpenURLInterpreter.interpret(URL(string: "https://example.com/a.txt")!) == nil)
     }
+
+    @Test func lineAndColumnPositionIsParsed() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://reuse-window?path=/tmp/a.txt&line=12&col=4")!
+        )
+
+        #expect(request?.targets == [
+            OpenTarget(
+                fileURL: URL(fileURLWithPath: "/tmp/a.txt").standardizedFileURL,
+                selection: TextSelection(
+                    start: TextPosition(line: 12, column: 4),
+                    end: TextPosition(line: 12, column: 4)
+                )
+            )
+        ])
+    }
+
+    @Test func lineRangeSelectionIsParsed() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=3-9")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 3, column: nil),
+            end: TextPosition(line: 9, column: nil)
+        ))
+    }
+
+    @Test func columnRangeAppliesToSelectionEndpoints() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=3-9&col=2-7")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 3, column: 2),
+            end: TextPosition(line: 9, column: 7)
+        ))
+    }
+
+    @Test func positionItemsAttachToThePrecedingPath() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://reuse-window?path=/tmp/a.txt&line=2&path=/tmp/b.txt&line=40-42")!
+        )
+
+        #expect(request?.targets.map(\.selection) == [
+            TextSelection(start: TextPosition(line: 2, column: 1), end: TextPosition(line: 2, column: 1)),
+            TextSelection(start: TextPosition(line: 40), end: TextPosition(line: 42)),
+        ])
+    }
+
+    @Test func bareLinePositionIsACaretNotAWholeLineHighlight() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=12")!
+        )
+
+        // A single position places a caret; the concrete column keeps the
+        // resolver from reading nil as "whole line" (ARCHITECTURE.md 5.1).
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 12, column: 1),
+            end: TextPosition(line: 12, column: 1)
+        ))
+    }
+
+    @Test func explicitSingleLineRangeSelectsTheWholeLine() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=12-12")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 12),
+            end: TextPosition(line: 12)
+        ))
+    }
+
+    @Test func singleLineColumnRangeIsASpan() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=12&col=2-7")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 12, column: 2),
+            end: TextPosition(line: 12, column: 7)
+        ))
+    }
+
+    @Test func singleColumnOnALineRangeAppliesToBothEndpoints() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=3-9&col=5")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 3, column: 5),
+            end: TextPosition(line: 9, column: 5)
+        ))
+    }
+
+    @Test func invalidPositionsRejectTheRequest() {
+        for query in ["line=0", "line=5-3", "line=abc", "col=2"] {
+            #expect(
+                OpenURLInterpreter.interpret(
+                    URL(string: "openedit://new-window?path=/tmp/a.txt&\(query)")!
+                ) == nil,
+                "expected \(query) to reject the request"
+            )
+        }
+    }
+
+    @Test func perOpenOptionsAreParsed() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&readonly=1&encoding=UTF-8&eol=crlf&tabsize=4&expand-tabs=1&wrap=0&highlighting=0&language=python&config=/tmp/languages.toml&lsp=0&autodetect=0&lsp-language=python&lsp-server=python=/opt/bin/pylsp&lsp-log=/tmp/lsp.log&watcher=0&watch-debounce=250&log-level=debug&log-file=/tmp/openedit.log&debug=1")!
+        )
+
+        let options = request!.options
+        #expect(options.readOnly)
+        #expect(options.encoding == "UTF-8")
+        #expect(options.lineEnding == .crlf)
+        #expect(options.tabSize == 4)
+        #expect(options.expandTabs)
+        #expect(options.wrapsLines == false)
+        #expect(options.highlighting == false)
+        #expect(options.forcedLanguage == "python")
+        #expect(options.configPath == "/tmp/languages.toml")
+        #expect(options.lspEnabled == false)
+        #expect(options.autodetectServers == false)
+        #expect(options.lspLanguage == "python")
+        #expect(options.lspServerOverrides == ["python": "/opt/bin/pylsp"])
+        #expect(options.lspLogPath == "/tmp/lsp.log")
+        #expect(options.watchesFile == false)
+        #expect(options.watchDebounceMilliseconds == 250)
+        #expect(options.logLevel == "debug")
+        #expect(options.logFilePath == "/tmp/openedit.log")
+        #expect(options.debug)
+    }
+
+    @Test func reopenRequestNeedsNoTargets() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://reuse-window?action=reopen")!
+        )
+
+        #expect(request?.action == .reopen)
+        #expect(request?.targets.isEmpty == true)
+    }
 }
 
 @Suite struct OpenPlacementRouterTests {

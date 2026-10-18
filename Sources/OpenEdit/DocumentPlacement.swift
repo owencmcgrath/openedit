@@ -38,7 +38,8 @@ enum DocumentPlacement {
     static func present(
         _ controller: NSWindowController,
         intent: OpenIntent,
-        reusing reuseTarget: NSWindow?
+        reusing reuseTarget: NSWindow?,
+        activate: Bool = true
     ) {
         guard let window = controller.window else { return }
         if let reuseTarget, reuseTarget !== window {
@@ -56,6 +57,10 @@ enum DocumentPlacement {
             window.tabbingIdentifier = ""
         }
         controller.showWindow(nil)
-        window.makeKeyAndOrderFront(nil)
+        if activate {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            window.orderFront(nil)
+        }
     }
 }

@@ -1,31 +1,150 @@
 #!/usr/bin/env bash
-# openedit — CLI shim for OpenEdit.app (ARCHITECTURE.md 5.1).
+# openedit — CLI shim for OpenEdit.app (ARCHITECTURE.md 5.1, #46).
 #
 # Fire-and-forget: hands each file to the running OpenEdit instance (or
-# launches one) via LaunchServices and exits as soon as `open` returns.
-# Paths are made absolute and checked here because the Apple Event target
-# resolves relative paths against the app's CWD, not the caller's.
+# launches one) via LaunchServices and exits as soon as `open` returns. Paths
+# are made absolute and checked here because the Apple Event target resolves
+# relative paths against the app's CWD, not the caller's.
 #
-# Default is to reuse the frontmost OpenEdit window: a plain file open
-# (`open -a`, no -n) reuses the running instance and the app tabs the file
-# into the window you are already looking at. `--new-window` opts out by
-# carrying the intent as an `openedit://` host, because `--args` are ignored
-# when an instance is already running and `-n` would force a second process.
+# Anything that cannot travel as a launch argument rides as query items on an
+# `openedit://` URL: `--args` are ignored when an instance is already running,
+# and `-n` would force a second process (#22). A plain `open -a` is used only
+# for a bare default open with no options.
 #
-# A blocking $EDITOR mode is deferred (ARCHITECTURE.md 5.1/8); the arg loop
-# below is where a flag like --wait slots in later without reshaping this
-# script.
+# `--wait` is the one blocking path (ARCHITECTURE.md 5.1): the shim writes a
+# status file under $TMPDIR, the app replaces it on open/save/close, and this
+# process polls until the document closes.
 
 set -u
 
+shim_version="0.1.0"
+
+usage_line() {
+    echo "usage: openedit [options] [--] [file[:line[:col]] ...]" >&2
+}
+
 usage() {
-    echo "usage: openedit [--new-window] [file ...]" >&2
-    exit 2
+    cat <<'EOF'
+usage: openedit [options] [--] [file[:line[:col]] ...]
+
+Open files in OpenEdit.app. Reuses the frontmost document window by default.
+
+Informational
+  -h, --help                 Show this help and exit
+      --usage                Show the one-line usage and exit
+  -V, --version              Print the app/shim version and exit
+  -v, --verbose              Print what the shim is doing (stderr)
+  -q, --quiet                Suppress non-error output
+      --                     End option parsing
+
+Position
+  file:LINE[:COL]            Jump to a line/column (1-based)
+  file:START-END             Select a line range
+      --goto SPEC            Same grammar, without a file prefix
+  -l, --line SPEC            LINE or START-END
+  -c, --col SPEC             COL or START-END (applies to selection endpoints)
+
+Window and session
+      --new-window           Always open a new window
+      --reuse-window         Reuse the frontmost window (default)
+      --tabs, --no-tabs      Aliases for the default and --new-window
+      --reopen               Reopen the most recently closed file
+  -b, --background           Do not activate OpenEdit
+      --activate             Activate OpenEdit (default)
+      --size WxH             New document window size
+      --position X,Y         New document window origin
+
+$EDITOR mode
+  -w, --wait                 Block until the document closes
+      --print-filename       Print the saved path on close (requires --wait)
+
+Buffers
+      --stdin, -             Read stdin into a scratch document
+      --scratch, --temp      Open an untitled scratch document
+
+Language and highlighting
+      --no-highlighting      Disable syntax highlighting
+      --force-language ID    Use this language/grammar for the document
+      --grammar-dir PATH     Extra grammar/query search root
+      --config PATH          Per-document languages.toml
+      --no-config            Ignore the user languages.toml for this document
+
+Language servers
+      --no-lsp               Disable LSP for this document
+      --no-autodetect        Do not probe the known-server catalog
+      --lsp-language ID      Use this config entry for the server
+      --lsp-server ID=PATH   Literal server executable for a language ID
+      --lsp-log PATH         Write language-server stderr to this file
+
+File watcher and text
+      --no-watcher           Do not watch the file for external changes
+      --watch-debounce MS    Coalesce watcher events (default 0)
+  -R, --readonly             Open read-only (alias: --read-only)
+      --encoding CHARSET     Decode/write this charset (e.g. UTF-8)
+      --eol lf|crlf          Normalize and save with this line ending
+      --tabsize N            Tab width
+      --expand-tabs          Insert spaces instead of tab characters
+      --wrap, --no-wrap      Toggle soft wrapping
+
+Developer
+      --log-level LEVEL      error | warning | info | debug
+      --log-file PATH        Append app logs to PATH
+      --debug                Debug logging plus verbose shim output
+      --dry-run              Print the open command instead of running it
+      --json                 Machine-readable output for informational commands
+                             (version, suppressions, app path, selftest, dry-run)
+      --print-app-path       Print the resolved app path and exit
+      --list-suppressions    List dismissed missing-LSP languages
+      --reset-suppression ID Clear one dismissed language
+      --app PATH             Use this OpenEdit.app (alias: --app-path)
+      --selftest             Check the shim's app/launch plumbing
+EOF
+}
+
+die() {
+    local message="$1" code="${2:-2}"
+    echo "openedit: $message" >&2
+    exit "$code"
+}
+
+# Percent-encode one value for an `openedit://` query item. Byte-wise
+# (LC_ALL=C) so multibyte UTF-8 paths encode correctly; unreserved characters
+# per RFC 3986 pass through.
+urlencode() {
+    local LC_ALL=C
+    local encoded=""
+    local string="$1"
+    local i char
+    for (( i=0; i<${#string}; i++ )); do
+        char="${string:i:1}"
+        case "$char" in
+            [a-zA-Z0-9.~/_-]) encoded+="$char" ;;
+            *)
+                printf -v char '%%%02X' "'$char"
+                encoded+="$char"
+                ;;
+        esac
+    done
+    printf '%s' "$encoded"
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "$value"
 }
 
 app_path() {
-    # 1. Explicit override — how packaging (e.g. a Homebrew cask, Build
-    #    Sequence item 10) will point the shim at its app location.
+    # 1. --app / OPENEDIT_APP override.
+    if [[ -n "${app_override:-}" ]]; then
+        if [[ -d "$app_override" ]]; then
+            printf '%s' "$app_override"
+            return 0
+        fi
+        return 1
+    fi
     if [[ -n "${OPENEDIT_APP:-}" && -d "$OPENEDIT_APP" ]]; then
         printf '%s' "$OPENEDIT_APP"
         return 0
@@ -48,89 +167,755 @@ app_path() {
     return 1
 }
 
-# Percent-encode one path for an `openedit://` query item. Byte-wise (LC_ALL=C)
-# so multibyte UTF-8 paths encode correctly; unreserved characters per RFC 3986
-# pass through.
-urlencode() {
-    local LC_ALL=C
-    local encoded=""
-    local string="$1"
-    local i char
-    for (( i=0; i<${#string}; i++ )); do
-        char="${string:i:1}"
-        case "$char" in
-            [a-zA-Z0-9.~/_-]) encoded+="$char" ;;  # / plus RFC 3986 unreserved
-            *)
-                printf -v char '%%%02X' "'$char"
-                encoded+="$char"
-                ;;
-        esac
-    done
-    printf '%s' "$encoded"
+app_version() {
+    local app="$1"
+    local plist="$app/Contents/Info.plist"
+    local version=""
+    if [[ -f "$plist" ]]; then
+        version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist" 2>/dev/null || true)"
+    fi
+    printf '%s' "${version:-$shim_version}"
 }
 
-new_window=0
-files=()
+validate_positive_int() {
+    local value="$1" label="$2"
+    [[ "$value" =~ ^[0-9]+$ ]] || die "$label must be a positive integer" 2
+    (( value > 0 )) || die "$label must be a positive integer" 2
+}
+
+validate_range() {
+    local value="$1" label="$2" start end
+    [[ "$value" =~ ^([0-9]+)(-([0-9]+))?$ ]] || die "$label must be N or START-END" 2
+    start="${BASH_REMATCH[1]}"
+    end="${BASH_REMATCH[3]:-$start}"
+    (( start > 0 && end > 0 )) || die "$label values are 1-based" 2
+    (( start <= end )) || die "$label start must not exceed end" 2
+    printf '%s' "$value"
+}
+
+# `--encoding` must name a charset the app can actually resolve (ARCHITECTURE.md
+# 5.1); otherwise the document would silently fall back to UTF-8 on save.
+# Compares dash/underscore-insensitively and case-insensitively against the
+# charsets iconv knows, which overlap the app's CFString-based table for every
+# common name. Fails open when iconv is unavailable.
+validate_charset() {
+    local value="$1" normalized
+    command -v iconv >/dev/null 2>&1 || return 0
+    normalized="$(printf '%s' "$value" | tr -d -- '-_ ' | tr '[:lower:]' '[:upper:]')"
+    [[ -n "$normalized" ]] || die "--encoding: unknown charset: $value" 2
+    if ! /usr/bin/iconv -l 2>/dev/null | tr '[:space:]' '\n' \
+        | tr -d -- '-_ ' | tr '[:lower:]' '[:upper:]' \
+        | grep -qxF -- "$normalized"; then
+        die "--encoding: unknown charset: $value (see iconv --list)" 2
+    fi
+}
+
+# Parse a positional file argument. Sets PARSED_PATH / PARSED_LINE / PARSED_COL.
+parse_file_argument() {
+    local argument="$1"
+    PARSED_PATH=""
+    PARSED_LINE=""
+    PARSED_COL=""
+
+    if [[ "$argument" =~ ^(.+):([0-9]+)-([0-9]+)$ ]]; then
+        PARSED_PATH="${BASH_REMATCH[1]}"
+        PARSED_LINE="${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+        validate_range "$PARSED_LINE" "line range" >/dev/null
+    elif [[ "$argument" =~ ^(.+):([0-9]+):([0-9]+)$ ]]; then
+        PARSED_PATH="${BASH_REMATCH[1]}"
+        PARSED_LINE="${BASH_REMATCH[2]}"
+        PARSED_COL="${BASH_REMATCH[3]}"
+        validate_positive_int "$PARSED_LINE" "line" >/dev/null
+        validate_positive_int "$PARSED_COL" "column" >/dev/null
+    elif [[ "$argument" =~ ^(.+):([0-9]+)$ ]]; then
+        PARSED_PATH="${BASH_REMATCH[1]}"
+        PARSED_LINE="${BASH_REMATCH[2]}"
+        validate_positive_int "$PARSED_LINE" "line" >/dev/null
+    else
+        PARSED_PATH="$argument"
+    fi
+}
+
+suppressed_language_ids() {
+    defaults read com.openedit.app 2>/dev/null \
+        | sed -n 's/^[[:space:]]*"missingLSP\.suppressed\.\([^"]*\)"[[:space:]]*=[[:space:]]*1;.*/\1/p' \
+        | sort
+}
+
+print_suppressions_json() {
+    local first=1 id
+    printf '['
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if (( first )); then first=0; else printf ','; fi
+        printf '"%s"' "$(json_escape "$id")"
+    done < <(suppressed_language_ids)
+    printf ']'
+}
+
+# --- Flag parsing ----------------------------------------------------------
+
+# Split `--flag=value` into two arguments up front so the loop below can treat
+# every value-taking option uniformly. (`--lsp-server=python=/path` becomes
+# `--lsp-server` `python=/path`, which is what we want.)
+normalized=()
 for argument in "$@"; do
+    if [[ "$argument" == --*=* ]]; then
+        normalized+=("${argument%%=*}" "${argument#*=}")
+    else
+        normalized+=("$argument")
+    fi
+done
+set -- "${normalized[@]}"
+
+new_window=0
+action="open"
+reopen_requested=0
+background=0
+verbose=0
+quiet=0
+dry_run=0
+selftest=0
+print_app_path=0
+wait_mode=0
+print_filename=0
+stdin_requested=0
+scratch=0
+read_only=0
+highlighting=1
+lsp_enabled=1
+autodetect=1
+watcher=1
+wrap=""
+expand_tabs=0
+debug=0
+json_output=0
+list_suppressions=0
+reset_suppression=""
+version_requested=0
+app_override=""
+config_path=""
+no_config=0
+encoding=""
+eol=""
+tab_size=""
+watch_debounce=""
+force_language=""
+grammar_dir=""
+lsp_language=""
+lsp_log=""
+log_level=""
+log_file=""
+goto_spec=""
+global_line=""
+global_col=""
+window_size=""
+window_position=""
+
+files=()
+file_lines=()
+file_cols=()
+lsp_servers=()
+
+while (( $# )); do
+    argument="$1"
     case "$argument" in
         -h|--help)
             usage
+            exit 0
             ;;
-        --new-window)
+        --usage)
+            echo "usage: openedit [options] [--] [file[:line[:col]] ...]"
+            exit 0
+            ;;
+        -V|--version)
+            version_requested=1
+            shift
+            ;;
+        -v|--verbose)
+            verbose=1
+            shift
+            ;;
+        -q|--quiet)
+            quiet=1
+            shift
+            ;;
+        --json)
+            json_output=1
+            shift
+            ;;
+        --app|--app-path)
+            (( $# >= 2 )) || die "$argument requires a path" 2
+            app_override="$2"
+            [[ -d "$app_override" ]] || die "no such app: $app_override" 1
+            shift 2
+            ;;
+        --print-app-path)
+            print_app_path=1
+            shift
+            ;;
+        --dry-run)
+            dry_run=1
+            shift
+            ;;
+        --selftest)
+            selftest=1
+            shift
+            ;;
+        --new-window|--no-tabs)
             new_window=1
+            shift
             ;;
-        --reuse-window)
-            # Explicit form of the default; accepted for symmetry.
+        --reuse-window|--tabs)
             new_window=0
+            shift
+            ;;
+        --reopen)
+            reopen_requested=1
+            action="reopen"
+            shift
+            ;;
+        -b|--background)
+            background=1
+            shift
+            ;;
+        --activate)
+            background=0
+            shift
+            ;;
+        --size)
+            (( $# >= 2 )) || die "--size requires WxH" 2
+            window_size="$2"
+            [[ "$window_size" =~ ^[0-9]+x[0-9]+$ ]] || die "--size must be WxH" 2
+            [[ "${window_size%%x*}" -gt 0 && "${window_size##*x}" -gt 0 ]] \
+                || die "--size dimensions must be positive" 2
+            shift 2
+            ;;
+        --position)
+            (( $# >= 2 )) || die "--position requires X,Y" 2
+            window_position="$2"
+            [[ "$window_position" =~ ^-?[0-9]+,-?[0-9]+$ ]] || die "--position must be X,Y" 2
+            shift 2
+            ;;
+        -w|--wait)
+            wait_mode=1
+            shift
+            ;;
+        --print-filename)
+            print_filename=1
+            shift
+            ;;
+        --stdin)
+            stdin_requested=1
+            shift
+            ;;
+        --scratch|--temp)
+            scratch=1
+            shift
+            ;;
+        --no-highlighting)
+            highlighting=0
+            shift
+            ;;
+        --force-language)
+            (( $# >= 2 )) || die "--force-language requires a language ID" 2
+            force_language="$2"
+            shift 2
+            ;;
+        --grammar-dir)
+            (( $# >= 2 )) || die "--grammar-dir requires a path" 2
+            grammar_dir="$2"
+            [[ -d "$grammar_dir" ]] || die "no such directory: $grammar_dir" 1
+            shift 2
+            ;;
+        --config)
+            (( $# >= 2 )) || die "--config requires a path" 2
+            config_path="$2"
+            [[ -f "$config_path" ]] || die "no such config: $config_path" 1
+            shift 2
+            ;;
+        --no-config)
+            no_config=1
+            shift
+            ;;
+        --no-lsp)
+            lsp_enabled=0
+            shift
+            ;;
+        --no-autodetect)
+            autodetect=0
+            shift
+            ;;
+        --lsp-language)
+            (( $# >= 2 )) || die "--lsp-language requires a language ID" 2
+            lsp_language="$2"
+            shift 2
+            ;;
+        --lsp-server)
+            (( $# >= 2 )) || die "--lsp-server requires ID=PATH" 2
+            [[ "$2" == *=* && "$2" != *= ]] || die "--lsp-server requires ID=PATH" 2
+            lsp_servers+=("$2")
+            shift 2
+            ;;
+        --lsp-log)
+            (( $# >= 2 )) || die "--lsp-log requires a path" 2
+            lsp_log="$2"
+            shift 2
+            ;;
+        --no-watcher)
+            watcher=0
+            shift
+            ;;
+        --watch-debounce)
+            (( $# >= 2 )) || die "--watch-debounce requires milliseconds" 2
+            watch_debounce="$2"
+            [[ "$watch_debounce" =~ ^[0-9]+$ ]] || die "--watch-debounce must be milliseconds" 2
+            shift 2
+            ;;
+        -R|--readonly|--read-only)
+            read_only=1
+            shift
+            ;;
+        --encoding)
+            (( $# >= 2 )) || die "--encoding requires a charset" 2
+            encoding="$2"
+            shift 2
+            ;;
+        --eol)
+            (( $# >= 2 )) || die "--eol requires lf or crlf" 2
+            eol="$2"
+            [[ "$eol" == "lf" || "$eol" == "crlf" ]] || die "--eol must be lf or crlf" 2
+            shift 2
+            ;;
+        --tabsize)
+            (( $# >= 2 )) || die "--tabsize requires a number" 2
+            tab_size="$2"
+            validate_positive_int "$tab_size" "--tabsize"
+            shift 2
+            ;;
+        --expand-tabs)
+            expand_tabs=1
+            shift
+            ;;
+        --wrap)
+            wrap=1
+            shift
+            ;;
+        --no-wrap)
+            wrap=0
+            shift
+            ;;
+        --log-level)
+            (( $# >= 2 )) || die "--log-level requires error|warning|info|debug" 2
+            log_level="$2"
+            case "$log_level" in
+                error|err|warning|warn|info|debug) ;;
+                *) die "--log-level must be error, warning, info, or debug" 2 ;;
+            esac
+            shift 2
+            ;;
+        --log-file)
+            (( $# >= 2 )) || die "--log-file requires a path" 2
+            log_file="$2"
+            shift 2
+            ;;
+        --debug)
+            debug=1
+            verbose=1
+            shift
+            ;;
+        --list-suppressions)
+            list_suppressions=1
+            shift
+            ;;
+        --reset-suppression)
+            (( $# >= 2 )) || die "--reset-suppression requires a language ID" 2
+            reset_suppression="$2"
+            shift 2
+            ;;
+        --goto)
+            (( $# >= 2 )) || die "--goto requires SPEC" 2
+            goto_spec="$2"
+            shift 2
+            ;;
+        -l|--line)
+            (( $# >= 2 )) || die "$argument requires SPEC" 2
+            global_line="$2"
+            shift 2
+            ;;
+        -c|--col)
+            (( $# >= 2 )) || die "$argument requires SPEC" 2
+            global_col="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            while (( $# )); do
+                argument="$1"
+                if [[ "$argument" == "-" ]]; then
+                    stdin_requested=1
+                else
+                    parse_file_argument "$argument"
+                    files+=("$PARSED_PATH")
+                    file_lines+=("$PARSED_LINE")
+                    file_cols+=("$PARSED_COL")
+                fi
+                shift
+            done
+            ;;
+        -)
+            stdin_requested=1
+            shift
             ;;
         -*)
             echo "openedit: unsupported option: $argument" >&2
-            usage
+            usage_line
+            exit 2
             ;;
         *)
-            if [[ "$argument" != /* ]]; then
-                argument="$PWD/$argument"
-            fi
-            if [[ ! -e "$argument" ]]; then
-                echo "openedit: no such file: $argument" >&2
-                exit 1
-            fi
-            if [[ -d "$argument" ]]; then
-                echo "openedit: not a file: $argument" >&2
-                exit 1
-            fi
-            files+=("$argument")
+            parse_file_argument "$argument"
+            files+=("$PARSED_PATH")
+            file_lines+=("$PARSED_LINE")
+            file_cols+=("$PARSED_COL")
+            shift
             ;;
     esac
 done
 
-APP="$(app_path)"
-if [[ -z "$APP" ]]; then
-    echo "openedit: OpenEdit.app not found; set OPENEDIT_APP or install the app" >&2
-    exit 1
-fi
+# --- Informational commands that do not need an app launch -----------------
 
-if [[ ${#files[@]} -eq 0 ]]; then
-    if (( new_window )); then
-        # There is no path to carry the opt-out in an `openedit://` URL (and an
-        # empty new window has no meaning distinct from the default), so reject
-        # the combination rather than silently ignoring the flag.
-        echo "openedit: --new-window requires at least one file" >&2
-        exit 2
+if (( version_requested )); then
+    APP="$(app_path || true)"
+    version="$shim_version"
+    if [[ -n "$APP" ]]; then
+        version="$(app_version "$APP")"
     fi
-    exec open -a "$APP"
+    if (( json_output )); then
+        printf '{"name":"openedit","version":"%s"}\n' "$(json_escape "$version")"
+    else
+        printf 'openedit %s\n' "$version"
+    fi
+    exit 0
 fi
 
+if (( list_suppressions )); then
+    if (( json_output )); then
+        print_suppressions_json
+        printf '\n'
+    else
+        suppressed_language_ids
+    fi
+    exit 0
+fi
+
+if [[ -n "$reset_suppression" ]]; then
+    defaults delete com.openedit.app "missingLSP.suppressed.$reset_suppression" >/dev/null 2>&1 || true
+    if (( json_output )); then
+        printf '{"reset":"%s"}\n' "$(json_escape "$reset_suppression")"
+    elif (( ! quiet )); then
+        printf 'reset %s\n' "$reset_suppression"
+    fi
+    exit 0
+fi
+
+if (( print_app_path )); then
+    APP="$(app_path)" || die "OpenEdit.app not found; set OPENEDIT_APP or install the app" 1
+    if (( json_output )); then
+        printf '{"app":"%s"}\n' "$(json_escape "$APP")"
+    else
+        printf '%s\n' "$APP"
+    fi
+    exit 0
+fi
+
+if (( selftest )); then
+    APP="$(app_path)" || die "OpenEdit.app not found; set OPENEDIT_APP or install the app" 1
+    version="$(app_version "$APP")"
+    open_tool="$(command -v open || true)"
+    [[ -n "$open_tool" ]] || die "the macOS open tool was not found" 1
+    encoded="$(urlencode "/tmp/a b.txt")"
+    [[ "$encoded" == "/tmp/a%20b.txt" ]] || die "URL encoding selftest failed" 1
+    if (( json_output )); then
+        printf '{"ok":true,"app":"%s","version":"%s","open":"%s","urlencode":"%s"}\n' \
+            "$(json_escape "$APP")" "$(json_escape "$version")" \
+            "$(json_escape "$open_tool")" "$(json_escape "$encoded")"
+    else
+        printf 'ok\napp: %s\nversion: %s\nopen: %s\nurlencode: %s\n' \
+            "$APP" "$version" "$open_tool" "$encoded"
+    fi
+    exit 0
+fi
+
+# --- Cross-flag validation -------------------------------------------------
+
+(( print_filename )) && (( ! wait_mode )) && die "--print-filename requires --wait" 2
+(( wait_mode )) && (( reopen_requested )) && die "--wait cannot be combined with --reopen" 2
+(( reopen_requested )) && (( ${#files[@]} > 0 || stdin_requested || scratch )) \
+    && die "--reopen cannot be combined with files, --stdin, or --scratch" 2
+(( stdin_requested )) && (( ${#files[@]} > 0 )) && die "--stdin cannot be combined with file arguments" 2
+(( stdin_requested )) && (( scratch )) && die "--stdin and --scratch are mutually exclusive" 2
+
+if [[ -n "$goto_spec" ]]; then
+    if [[ "$goto_spec" =~ ^([0-9]+)(-([0-9]+))?$ ]]; then
+        global_line="$goto_spec"
+    elif [[ "$goto_spec" =~ ^([0-9]+):([0-9]+)$ ]]; then
+        global_line="${BASH_REMATCH[1]}"
+        global_col="${BASH_REMATCH[2]}"
+    else
+        die "--goto must be LINE, LINE:COL, or START-END" 2
+    fi
+fi
+[[ -n "$global_line" ]] && validate_range "$global_line" "--line" >/dev/null
+[[ -n "$global_col" ]] && validate_range "$global_col" "--col" >/dev/null
+[[ -n "$encoding" ]] && validate_charset "$encoding"
+[[ -n "$global_col" && -z "$global_line" ]] && die "--col requires --line or --goto" 2
+if [[ -n "$global_line" || -n "$global_col" ]] \
+    && (( ${#files[@]} != 1 && ! stdin_requested )); then
+    die "--line/--col/--goto require exactly one file or --stdin" 2
+fi
+if [[ -n "$global_line" || -n "$global_col" ]] && (( ${#file_lines[@]} == 1 )) \
+    && [[ -n "${file_lines[0]}" || -n "${file_cols[0]}" ]]; then
+    die "position specified both inline and with --line/--col" 2
+fi
+if [[ -n "$global_col" ]] && (( ${#file_cols[@]} > 0 )) && [[ -n "${file_cols[0]}" ]]; then
+    die "position specified both inline and with --col" 2
+fi
+
+if (( wait_mode )) && (( ${#files[@]} == 0 && ! stdin_requested && ! scratch )); then
+    die "--wait requires a file, --stdin, or --scratch" 2
+fi
+if (( new_window )) && (( ${#files[@]} == 0 && ! stdin_requested && ! scratch && ! reopen_requested )); then
+    die "--new-window requires at least one file or a scratch buffer" 2
+fi
+if (( scratch )) && (( ${#files[@]} > 0 )); then
+    die "--scratch cannot be combined with file arguments" 2
+fi
+if (( ${#files[@]} == 0 && ! stdin_requested && ! scratch && ! reopen_requested )); then
+    if [[ -n "$global_line" || -n "$global_col" || -n "$window_size" || -n "$window_position" ]]; then
+        die "position/window options require a file or scratch buffer" 2
+    fi
+fi
+
+# Validate file arguments.
+for (( i=0; i<${#files[@]}; i++ )); do
+    file="${files[$i]}"
+    if [[ "$file" != /* ]]; then
+        file="$PWD/$file"
+    fi
+    if [[ ! -e "$file" ]]; then
+        die "no such file: $file" 1
+    fi
+    if [[ -d "$file" ]]; then
+        die "not a file: $file" 1
+    fi
+    files[$i]="$file"
+done
+
+APP="$(app_path || true)"
+if [[ -z "$APP" ]]; then
+    die "OpenEdit.app not found; set OPENEDIT_APP or install the app" 1
+fi
+
+# --- Build the request -----------------------------------------------------
+
+url="openedit://"
 if (( new_window )); then
-    # Carry the opt-out as a custom-scheme URL; -a forces delivery to OpenEdit
-    # even though the URL has no file path for LaunchServices to resolve.
-    url="openedit://new-window"
-    separator="?"
-    for file in "${files[@]}"; do
-        url+="${separator}path=$(urlencode "$file")"
-        separator="&"
+    url+="new-window"
+else
+    url+="reuse-window"
+fi
+separator="?"
+
+append_query() {
+    url+="${separator}$(urlencode "$1")=$(urlencode "$2")"
+    separator="&"
+}
+
+# `--stdin`: write the buffer to a temp file the app opens as scratch and
+# deletes on close (ARCHITECTURE.md 5.1).
+stdin_temp=""
+if (( stdin_requested )); then
+    if (( dry_run )); then
+        stdin_temp="${TMPDIR:-/tmp}/openedit-stdin-XXXXXX"
+    else
+        stdin_temp="$(mktemp "${TMPDIR:-/tmp}/openedit-stdin-XXXXXX")" || die "could not create a stdin temp file" 1
+        cat > "$stdin_temp" || { rm -f "$stdin_temp"; die "could not read stdin" 1; }
+    fi
+    append_query path "$stdin_temp"
+    [[ -n "$global_line" ]] && append_query line "$global_line"
+    [[ -n "$global_col" ]] && append_query col "$global_col"
+elif (( ${#files[@]} > 0 )); then
+    for (( i=0; i<${#files[@]}; i++ )); do
+        append_query path "${files[$i]}"
+        line_spec="${file_lines[$i]}"
+        col_spec="${file_cols[$i]}"
+        [[ -n "$line_spec" ]] || line_spec="$global_line"
+        if [[ -z "$col_spec" ]]; then
+            col_spec="$global_col"
+        fi
+        [[ -n "$line_spec" ]] && append_query line "$line_spec"
+        [[ -n "$col_spec" ]] && append_query col "$col_spec"
     done
-    exec open -a "$APP" "$url"
 fi
 
-exec open -a "$APP" "${files[@]}"
+if (( reopen_requested )); then
+    append_query action "reopen"
+fi
+if (( scratch || stdin_requested )); then
+    append_query scratch "1"
+fi
+if (( read_only )); then
+    append_query readonly "1"
+fi
+[[ -n "$encoding" ]] && append_query encoding "$encoding"
+[[ -n "$eol" ]] && append_query eol "$eol"
+[[ -n "$tab_size" ]] && append_query tabsize "$tab_size"
+(( expand_tabs )) && append_query expand-tabs "1"
+[[ -n "$wrap" ]] && append_query wrap "$wrap"
+(( ! highlighting )) && append_query highlighting "0"
+[[ -n "$force_language" ]] && append_query language "$force_language"
+[[ -n "$grammar_dir" ]] && append_query grammar-dir "$grammar_dir"
+if (( no_config )); then
+    append_query no-config "1"
+elif [[ -n "$config_path" ]]; then
+    append_query config "$config_path"
+fi
+(( ! lsp_enabled )) && append_query lsp "0"
+(( ! autodetect )) && append_query autodetect "0"
+[[ -n "$lsp_language" ]] && append_query lsp-language "$lsp_language"
+for server in "${lsp_servers[@]:-}"; do
+    [[ -n "$server" ]] && append_query lsp-server "$server"
+done
+[[ -n "$lsp_log" ]] && append_query lsp-log "$lsp_log"
+(( ! watcher )) && append_query watcher "0"
+[[ -n "$watch_debounce" ]] && append_query watch-debounce "$watch_debounce"
+[[ -n "$window_size" ]] && append_query size "$window_size"
+[[ -n "$window_position" ]] && append_query position "$window_position"
+(( background )) && append_query background "1"
+[[ -n "$log_level" ]] && append_query log-level "$log_level"
+[[ -n "$log_file" ]] && append_query log-file "$log_file"
+(( debug )) && append_query debug "1"
+
+wait_file=""
+if (( wait_mode )); then
+    if (( dry_run )); then
+        wait_file="${TMPDIR:-/tmp}/openedit-wait-XXXXXX.json"
+    else
+        wait_file="${TMPDIR:-/tmp}/openedit-wait-$$-$(date +%s).json"
+        printf '{"state":"pending"}\n' > "$wait_file" || die "could not create the wait status file" 1
+    fi
+    append_query wait "$wait_file"
+fi
+if (( print_filename )); then
+    append_query print-filename "1"
+fi
+
+# A bare default open stays a plain odoc file open; everything else needs the
+# URL carrier because launch arguments cannot reach a running instance.
+use_url=""
+if (( new_window || reopen_requested || scratch || stdin_requested || wait_mode \
+    || background || highlighting == 0 || lsp_enabled == 0 || autodetect == 0 \
+    || watcher == 0 || read_only || expand_tabs || debug )); then
+    use_url=1
+fi
+if [[ -n "$encoding" || -n "$eol" || -n "$tab_size" || -n "$wrap" \
+    || -n "$force_language" || -n "$grammar_dir" || -n "$config_path" \
+    || -n "$lsp_language" || -n "$lsp_log" || -n "$watch_debounce" \
+    || -n "$window_size" || -n "$window_position" || -n "$log_level" \
+    || -n "$log_file" || -n "$global_line" || -n "$global_col" ]]; then
+    use_url=1
+fi
+for (( i=0; i<${#files[@]}; i++ )); do
+    [[ -n "${file_lines[$i]}${file_cols[$i]}" ]] && use_url=1
+done
+(( ${#lsp_servers[@]} > 0 )) && use_url=1
+(( no_config )) && use_url=1
+
+if (( ${#files[@]} == 0 && ! stdin_requested && ! scratch && ! reopen_requested )); then
+    # Pure activation has no document to carry options; only `open -g`
+    # (background) still applies.
+    use_url=""
+fi
+
+open_arguments=(-a "$APP")
+(( background )) && open_arguments=(-g "${open_arguments[@]}")
+
+if [[ -n "$use_url" ]]; then
+    launch_arguments=("${open_arguments[@]}" "$url")
+else
+    launch_arguments=("${open_arguments[@]}" "${files[@]}")
+fi
+
+if (( verbose && ! quiet )); then
+    printf 'openedit: app=%s\n' "$APP" >&2
+    # The prefix is printed once; each argument gets one %q expansion, not a
+    # repeat of the whole format string.
+    printf 'openedit: launch:'
+    printf ' %q' "${launch_arguments[@]}" >&2
+    printf '\n' >&2
+fi
+
+if (( dry_run )); then
+    if (( json_output )); then
+        printf '{"app":"%s","arguments":[' "$(json_escape "$APP")"
+        first=1
+        for item in "${launch_arguments[@]}"; do
+            if (( first )); then first=0; else printf ','; fi
+            printf '"%s"' "$(json_escape "$item")"
+        done
+        printf ']'
+        [[ -n "$wait_file" ]] && printf ',"waitFile":"%s"' "$(json_escape "$wait_file")"
+        printf '}\n'
+    else
+        printf '%q ' "${launch_arguments[@]}"
+        printf '\n'
+    fi
+    exit 0
+fi
+
+if (( ${#files[@]} == 0 && ! stdin_requested && ! scratch && ! reopen_requested )); then
+    if (( verbose && ! quiet )); then
+        printf 'openedit: activating %s\n' "$APP" >&2
+    fi
+    open "${open_arguments[@]}" || exit 1
+    exit 0
+fi
+
+open "${launch_arguments[@]}"
+open_status=$?
+if (( open_status != 0 )); then
+    [[ -n "$stdin_temp" ]] && rm -f "$stdin_temp"
+    [[ -n "$wait_file" ]] && rm -f "$wait_file"
+    exit "$open_status"
+fi
+
+# Phase 2 `--wait`: poll the app-owned status file. The app writes "open" on
+# document creation, "saved" on each save, and "closed" when the document tab
+# closes. A bounded handshake timeout catches a launch that never reaches the
+# app; after that the wait is unbounded, matching $EDITOR semantics.
+if (( wait_mode )); then
+    started="$(date +%s)"
+    acknowledged=0
+    while :; do
+        state="$(/usr/bin/plutil -extract state raw -o - "$wait_file" 2>/dev/null || true)"
+        case "$state" in
+            open|saved|closed) acknowledged=1 ;;
+        esac
+        [[ "$state" == "closed" ]] && break
+        if (( ! acknowledged )); then
+            now="$(date +%s)"
+            if (( now - started >= 10 )); then
+                rm -f "$wait_file"
+                die "timed out waiting for OpenEdit to open the document" 1
+            fi
+        fi
+        sleep 0.1
+    done
+    if (( print_filename )) && (( ! quiet )); then
+        saved_path="$(/usr/bin/plutil -extract path raw -o - "$wait_file" 2>/dev/null || true)"
+        [[ -n "$saved_path" ]] && printf '%s\n' "$saved_path"
+    fi
+    rm -f "$wait_file"
+fi
+
+exit 0

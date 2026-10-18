@@ -36,6 +36,14 @@ public protocol ServerTransport: AnyObject {
 /// that owns the frame decoder, and complete messages hop to the main actor,
 /// preserving byte order throughout.
 public final class ProcessTransport: ServerTransport {
+    /// Optional append-only stderr sink for `--lsp-log` (ARCHITECTURE.md 5.1).
+    /// Bound at spawn: one shared server per language (§5.5) means the sink the
+    /// process started with is the sink it keeps; later CLI requests do not
+    /// re-scope a running server.
+    private let stderrLogURL: URL?
+
+    nonisolated private static let stderrLogLock = NSLock()
+
     private let executablePath: String
     private let arguments: [String]
     private let environment: [String: String]?
@@ -54,10 +62,16 @@ public final class ProcessTransport: ServerTransport {
     /// `environment` overrides the inherited environment when non-nil; the app
     /// leaves it nil so servers see the same environment the app did, while
     /// tests use it to point at a per-test config.
-    public init(executablePath: String, arguments: [String] = [], environment: [String: String]? = nil) {
+    public init(
+        executablePath: String,
+        arguments: [String] = [],
+        environment: [String: String]? = nil,
+        stderrLogURL: URL? = nil
+    ) {
         self.executablePath = executablePath
         self.arguments = arguments
         self.environment = environment
+        self.stderrLogURL = stderrLogURL
         decoder.onMessage = { [weak self] body in
             guard let message = try? JSONRPCMessage.parse(body) else {
                 self?.close(with: LSPError.protocolError("message body is not a parseable JSON-RPC envelope"))
@@ -69,6 +83,20 @@ public final class ProcessTransport: ServerTransport {
         }
         decoder.onMalformed = { [weak self] reason in
             self?.close(with: LSPError.protocolError("malformed framing: \(reason)"))
+        }
+    }
+
+    nonisolated private static func appendStderr(_ text: String, to url: URL?) {
+        guard let url, let data = text.data(using: .utf8) else { return }
+        stderrLogLock.lock()
+        defer { stderrLogLock.unlock() }
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
         }
     }
 
@@ -102,10 +130,14 @@ public final class ProcessTransport: ServerTransport {
                 handle.readabilityHandler = nil
                 return
             }
+            // The sink is captured at start, not read per chunk: the spawn-time
+            // sink is the process's sink for its whole lifetime (§5.1).
+            let stderrSink = self?.stderrLogURL
             self?.readQueue.async { [weak self] in
                 self?.stderrBuffer.append(chunk)
                 if let stderr = String(data: chunk, encoding: .utf8) {
                     NSLog("OpenEdit LSP stderr: %@", stderr)
+                    Self.appendStderr(stderr, to: stderrSink)
                 }
             }
         }
