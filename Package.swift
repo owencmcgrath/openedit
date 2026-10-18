@@ -92,7 +92,7 @@ let package = Package(
         // `LanguageServerAvailability` result this produces.
         .target(
             name: "OpenEditLSP",
-            dependencies: ["OpenEditConfig"],
+            dependencies: ["OpenEditConfig", "OpenEditLog"],
             path: "Sources/OpenEditLSP"
         ),
         // Open-placement routing (ARCHITECTURE.md 5.1). Split out from the
@@ -155,5 +155,11 @@ let package = Package(
             name: "OpenEditWindowingTests",
             dependencies: ["OpenEditWindowing", "OpenEdit"],
             path: "Tests/OpenEditWindowingTests"
-        )    ]
+        ),
+        .testTarget(
+            name: "OpenEditLogTests",
+            dependencies: ["OpenEditLog"],
+            path: "Tests/OpenEditLogTests"
+        )
+    ]
 )

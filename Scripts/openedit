@@ -192,6 +192,23 @@ validate_range() {
     printf '%s' "$value"
 }
 
+# `--encoding` must name a charset the app can actually resolve (ARCHITECTURE.md
+# 5.1); otherwise the document would silently fall back to UTF-8 on save.
+# Compares dash/underscore-insensitively and case-insensitively against the
+# charsets iconv knows, which overlap the app's CFString-based table for every
+# common name. Fails open when iconv is unavailable.
+validate_charset() {
+    local value="$1" normalized
+    command -v iconv >/dev/null 2>&1 || return 0
+    normalized="$(printf '%s' "$value" | tr -d -- '-_ ' | tr '[:lower:]' '[:upper:]')"
+    [[ -n "$normalized" ]] || die "--encoding: unknown charset: $value" 2
+    if ! /usr/bin/iconv -l 2>/dev/null | tr '[:space:]' '\n' \
+        | tr -d -- '-_ ' | tr '[:lower:]' '[:upper:]' \
+        | grep -qxF -- "$normalized"; then
+        die "--encoding: unknown charset: $value (see iconv --list)" 2
+    fi
+}
+
 # Parse a positional file argument. Sets PARSED_PATH / PARSED_LINE / PARSED_COL.
 parse_file_argument() {
     local argument="$1"
@@ -256,7 +273,6 @@ reopen_requested=0
 background=0
 verbose=0
 quiet=0
-json=0
 dry_run=0
 selftest=0
 print_app_path=0
@@ -324,7 +340,6 @@ while (( $# )); do
             shift
             ;;
         --json)
-            json=1
             json_output=1
             shift
             ;;
@@ -651,6 +666,7 @@ if [[ -n "$goto_spec" ]]; then
 fi
 [[ -n "$global_line" ]] && validate_range "$global_line" "--line" >/dev/null
 [[ -n "$global_col" ]] && validate_range "$global_col" "--col" >/dev/null
+[[ -n "$encoding" ]] && validate_charset "$encoding"
 [[ -n "$global_col" && -z "$global_line" ]] && die "--col requires --line or --goto" 2
 if [[ -n "$global_line" || -n "$global_col" ]] \
     && (( ${#files[@]} != 1 && ! stdin_requested )); then

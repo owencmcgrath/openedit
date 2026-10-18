@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import OpenEditLSP
+import OpenEditLog
 import OpenEditWindowing
 
 /// Identity snapshot of a file on disk, used to coalesce watcher events for a
@@ -44,11 +45,6 @@ final class TextDocument: NSDocument {
     private(set) var openOptions = OpenDocumentOptions()
     private(set) var initialSelection: TextSelection?
 
-    /// The line ending the document writes back. `nil` means "preserve the
-    /// text exactly as loaded"; an explicit `--eol` normalizes on load and
-    /// converts on save.
-    private var activeLineEnding: OpenLineEnding = .lf
-
     /// True for Untitled documents created by the launch machinery (AppKit's
     /// untitled-at-launch pass and the bare-executable fallbacks all route
     /// through `openUntitledDocumentAndDisplay`, which flags the result in
@@ -61,9 +57,11 @@ final class TextDocument: NSDocument {
     private var watcher: FileChangeWatcher?
     private var lastKnownFileStat: FileStat?
 
-    /// `--stdin`'s temp file, so a Save As elsewhere keeps it while a discard
-    /// (or an in-place save) removes the scratch original (ARCHITECTURE.md 5.1).
-    private var scratchOriginalURL: URL?
+    /// `--stdin`'s temp file. Per ARCHITECTURE.md 5.1 the app deletes it when
+    /// the document is closed/discarded — never at save time, so a Save As
+    /// elsewhere leaves the temp in place until close. Internal-settable so
+    /// tests can drive the lifecycle.
+    private(set) var scratchOriginalURL: URL?
 
     private var waitStatusURL: URL? {
         openOptions.waitToken.map { URL(fileURLWithPath: $0) }
@@ -108,8 +106,6 @@ final class TextDocument: NSDocument {
             )
         }
 
-        activeLineEnding = openOptions.lineEnding
-            ?? (decoded.contains("\r\n") ? .crlf : .lf)
         if openOptions.lineEnding != nil {
             text = Self.normalizedLineEndings(decoded, to: .lf)
         } else {
@@ -118,24 +114,45 @@ final class TextDocument: NSDocument {
         refreshWatchState()
     }
 
+    /// Warned once per document when `--encoding` cannot resolve to a charset
+    /// or cannot encode the document's text, so the UTF-8 fallback on save is
+    /// observable instead of silent (ARCHITECTURE.md 5.1).
+    private var didWarnEncodingFallback = false
+
     override func data(ofType typeName: String) throws -> Data {
-        let lineEnding = openOptions.lineEnding ?? activeLineEnding
-        let normalized = openOptions.lineEnding == nil
-            ? text
-            : Self.normalizedLineEndings(text, to: lineEnding)
+        let normalized: String
+        if let lineEnding = openOptions.lineEnding {
+            normalized = Self.normalizedLineEndings(text, to: lineEnding)
+        } else {
+            normalized = text
+        }
         if let encodingName = openOptions.encoding,
            let encoding = OpenTextEncoding.stringEncoding(forName: encodingName),
            let data = normalized.data(using: encoding)
         {
             return data
         }
+        warnEncodingFallback()
         return Data(normalized.utf8)
+    }
+
+    private func warnEncodingFallback() {
+        guard !didWarnEncodingFallback else { return }
+        didWarnEncodingFallback = true
+        OpenEditLog.shared.warning(
+            category: "document",
+            "--encoding '\(openOptions.encoding ?? "")' did not encode this document; saving as UTF-8"
+        )
     }
 
     override func makeWindowControllers() {
         addWindowController(DocumentWindowController(document: self))
         startLanguageServerFlow()
         updateWaitStatus(state: "open")
+        OpenEditLog.shared.info(
+            category: "document",
+            "opened \(fileURL?.path ?? "(untitled)")"
+        )
     }
 
     /// One document-open event for the language-server side (ARCHITECTURE.md
@@ -160,7 +177,6 @@ final class TextDocument: NSDocument {
             fileURL: fileURL,
             initialText: text,
             availability: availability,
-            languageID: language.languageID,
             resolvedLanguage: language
         )
     }
@@ -175,13 +191,11 @@ final class TextDocument: NSDocument {
         // here so the watcher callback (delivered asynchronously on the main
         // queue) sees the new stat and swallows it.
         refreshWatchState()
-        if openOptions.isScratch, scratchOriginalURL != url.standardizedFileURL {
-            // Save As moved the document off its stdin temp file: keep the new
-            // file, drop the scratch original.
-            removeScratchOriginal()
-        }
+        // A scratch document's stdin temp survives a Save As elsewhere (§5.1);
+        // close() is the only deletion point, so nothing is removed here.
         waitSavedPath = url.path
         updateWaitStatus(state: "saved", path: url.path)
+        OpenEditLog.shared.info(category: "document", "saved \(url.path)")
     }
 
     override func close() {
@@ -190,11 +204,12 @@ final class TextDocument: NSDocument {
         if let fileURL, !openOptions.isScratch, !AppDelegate.isTerminating {
             ReopenStore.shared.record(fileURL: fileURL)
         }
-        updateWaitStatus(
-            state: "closed",
-            path: openOptions.isScratch ? waitSavedPath : fileURL?.path
-        )
+        // A scratch document reports its save destination; a file document
+        // reports its own path (ARCHITECTURE.md 5.1).
+        let closedPath = openOptions.isScratch ? waitSavedPath : fileURL?.path
+        updateWaitStatus(state: "closed", path: closedPath)
         removeScratchOriginal()
+        OpenEditLog.shared.info(category: "document", "closed \(closedPath ?? "(untitled)")")
         super.close()
     }
 
@@ -209,8 +224,9 @@ final class TextDocument: NSDocument {
 
     private func removeScratchOriginal() {
         guard openOptions.isScratch, let scratchOriginalURL else { return }
-        // Whether it was discarded, saved in place, or saved elsewhere, the
-        // stdin temp is the shim's artifact and is removed on close.
+        // Whether it was discarded, saved in place, or saved elsewhere via
+        // Save As, the stdin temp is the shim's artifact and is removed at
+        // close — the single deletion point (ARCHITECTURE.md 5.1).
         try? FileManager.default.removeItem(at: scratchOriginalURL)
         self.scratchOriginalURL = nil
     }

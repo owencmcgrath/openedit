@@ -222,6 +222,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // recognized-but-unparseable `openedit://` URL is ignored rather
             // than treated as a file, which would surface a bogus "not found".
             openFile(at: url, intent: .reuseExistingWindow, options: OpenDocumentOptions())
+        } else {
+            OpenEditLog.shared.warning(
+                category: "app",
+                "ignoring malformed openedit URL: \(url.absoluteString)"
+            )
         }
     }
 
@@ -240,6 +245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fileURL = options.logFilePath.map { URL(fileURLWithPath: $0) }
         if level != nil || fileURL != nil {
             OpenEditLog.shared.configure(level: level, fileURL: fileURL)
+            OpenEditLog.shared.info(
+                category: "app",
+                "logging configured (level: \(level?.name ?? "unchanged"), file: \(fileURL?.path ?? "unchanged"))"
+            )
         }
     }
 

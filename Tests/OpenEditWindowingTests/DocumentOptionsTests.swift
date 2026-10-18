@@ -50,6 +50,44 @@ import OpenEditWindowing
         #expect(saved == "café".data(using: .isoLatin1))
     }
 
+    @Test func scratchTempSurvivesSaveAsAndIsDeletedOnClose() throws {
+        // §5.1 `--stdin`: the temp file is deleted when the document is
+        // closed/discarded, not when it is saved elsewhere via Save As.
+        let url = try temporaryFile(contents: "stdin buffer")
+        var options = OpenDocumentOptions()
+        options.isScratch = true
+        TextDocument.pendingOpenOptions[url.standardizedFileURL] = options
+
+        let document = try TextDocument(fileAt: url)
+        #expect(document.scratchOriginalURL == url.standardizedFileURL)
+
+        let elsewhere = url.deletingLastPathComponent()
+            .appendingPathComponent("saved-elsewhere-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+        try document.writeSafely(
+            to: elsewhere,
+            ofType: TextDocument.fileTypeIdentifier,
+            for: .saveAsOperation
+        )
+        #expect(document.scratchOriginalURL == url.standardizedFileURL)
+        #expect(FileManager.default.fileExists(atPath: url.path))
+
+        document.close()
+        #expect(document.scratchOriginalURL == nil)
+        #expect(FileManager.default.fileExists(atPath: url.path) == false)
+    }
+
+    @Test func unknownEncodingNameFailsTheOpen() throws {
+        let url = try temporaryFile(contents: "x")
+        var options = OpenDocumentOptions()
+        options.encoding = "not-a-charset"
+        TextDocument.pendingOpenOptions[url.standardizedFileURL] = options
+
+        #expect(throws: CocoaError.self) {
+            _ = try TextDocument(fileAt: url)
+        }
+    }
+
     @Test func perDocumentConfigDefinesTheLanguage() throws {
         let url = try temporaryFile(contents: "x")
         let config = url.deletingLastPathComponent().appendingPathComponent("languages.toml")

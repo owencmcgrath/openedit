@@ -190,6 +190,15 @@ run_shim --no-highlighting --force-language python "$a"
 assert_eq "language overrides URL" \
     $'-a\n'"$fake_app"$'\n'"openedit://reuse-window?path=$a&highlighting=0&language=python" "$(forwarded)"
 
+# --encoding is validated against the known charset list (ARCHITECTURE.md 5.1).
+run_shim --encoding ISO-8859-1 "$a"
+assert_eq "--encoding URL" \
+    $'-a\n'"$fake_app"$'\n'"openedit://reuse-window?path=$a&encoding=ISO-8859-1" "$(forwarded)"
+
+run_shim --encoding not-a-charset "$a"
+assert_eq "unknown encoding exit code" 2 "$RUN_STATUS"
+assert_eq "unknown encoding does not forward" "" "$(forwarded)"
+
 run_shim --no-watcher --watch-debounce 250 "$a"
 assert_eq "watcher options URL" \
     $'-a\n'"$fake_app"$'\n'"openedit://reuse-window?path=$a&watcher=0&watch-debounce=250" "$(forwarded)"

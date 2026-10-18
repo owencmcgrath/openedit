@@ -1,4 +1,5 @@
 import Foundation
+import OpenEditLog
 
 /// Watches a single file path for external writes and fires a callback on the
 /// main queue. Uses a DispatchSource on the file's inode, which catches both
@@ -58,6 +59,7 @@ final class FileChangeWatcher {
     }
 
     private func deliverChange() {
+        OpenEditLog.shared.debug(category: "watcher", "file changed on disk: \(path)")
         // Whether the path is occupied again (rename-over replace) or gone
         // for good (external delete), the document decides what to do; the
         // watcher's only job is to report that *something* happened at the

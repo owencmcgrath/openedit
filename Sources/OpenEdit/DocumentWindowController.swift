@@ -227,7 +227,7 @@ final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NS
         let column = max(0, location - lineRange.location)
         let spaces = tabSize - (column % tabSize)
         textView.insertText(
-            String(repeating: " ", count: spaces == 0 ? tabSize : spaces),
+            String(repeating: " ", count: spaces),
             replacementRange: textView.selectedRange()
         )
         return true
