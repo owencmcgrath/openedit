@@ -62,8 +62,22 @@ public struct LanguageConfigLoadResult: Equatable, Sendable {
     public let registry: LanguageRegistry
     public let diagnostics: [LanguageConfigDiagnostic]
 
-    public init(registry: LanguageRegistry, diagnostics: [LanguageConfigDiagnostic]) {
+    /// The `languageId`s that came from explicit `[[language]]` entries in the
+    /// user's file, as opposed to the bundled defaults or the autodetection
+    /// catalog. The registry itself stays provenance-free; #51's Settings
+    /// dashboard uses this only to label where a row came from.
+    ///
+    /// A user `[[knownServer]]` entry is deliberately not listed: it is
+    /// autodetected behavior even though the catalog entry is user-authored.
+    public let userConfiguredLanguageIDs: Set<String>
+
+    public init(
+        registry: LanguageRegistry,
+        diagnostics: [LanguageConfigDiagnostic],
+        userConfiguredLanguageIDs: Set<String> = []
+    ) {
         self.registry = registry
         self.diagnostics = diagnostics
+        self.userConfiguredLanguageIDs = userConfiguredLanguageIDs
     }
 }
