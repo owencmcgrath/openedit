@@ -52,6 +52,7 @@
 			<string>OpenEdit.TextDocument</string>
 			<key>LSItemContentTypes</key>
 			<array>
+				<string>public.data</string>
 				<string>public.text</string>
 				<string>public.source-code</string>
 				<string>public.plain-text</string>
