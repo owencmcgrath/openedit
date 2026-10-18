@@ -848,7 +848,10 @@ fi
 
 if (( verbose && ! quiet )); then
     printf 'openedit: app=%s\n' "$APP" >&2
-    printf 'openedit: launch=%q ' "${launch_arguments[@]}" >&2
+    # The prefix is printed once; each argument gets one %q expansion, not a
+    # repeat of the whole format string.
+    printf 'openedit: launch:'
+    printf ' %q' "${launch_arguments[@]}" >&2
     printf '\n' >&2
 fi
 
