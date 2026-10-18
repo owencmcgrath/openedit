@@ -79,7 +79,7 @@ Language servers
 File watcher and text
       --no-watcher           Do not watch the file for external changes
       --watch-debounce MS    Coalesce watcher events (default 0)
-  -R, --readonly             Open read-only
+  -R, --readonly             Open read-only (alias: --read-only)
       --encoding CHARSET     Decode/write this charset (e.g. UTF-8)
       --eol lf|crlf          Normalize and save with this line ending
       --tabsize N            Tab width
@@ -91,11 +91,12 @@ Developer
       --log-file PATH        Append app logs to PATH
       --debug                Debug logging plus verbose shim output
       --dry-run              Print the open command instead of running it
-      --json                 Machine-readable output for supported commands
+      --json                 Machine-readable output for informational commands
+                             (version, suppressions, app path, selftest, dry-run)
       --print-app-path       Print the resolved app path and exit
       --list-suppressions    List dismissed missing-LSP languages
       --reset-suppression ID Clear one dismissed language
-      --app PATH             Use this OpenEdit.app
+      --app PATH             Use this OpenEdit.app (alias: --app-path)
       --selftest             Check the shim's app/launch plumbing
 EOF
 }
