@@ -17,6 +17,30 @@ import Testing
         #expect(range == NSRange(location: 8, length: 0))
     }
 
+    @Test func caretAtColumnOneIsTheLineStartNotTheWholeLine() {
+        // What a bare `file:N` resolves to after makeSelection normalizes the
+        // missing column; zero length means a caret, not a highlight.
+        let range = TextSelectionResolver.range(
+            for: TextSelection(
+                start: TextPosition(line: 2, column: 1),
+                end: TextPosition(line: 2, column: 1)
+            ),
+            in: text
+        )
+        #expect(range == NSRange(location: 6, length: 0))
+    }
+
+    @Test func explicitSingleLineRangeSelectsTheWholeLine() {
+        let range = TextSelectionResolver.range(
+            for: TextSelection(
+                start: TextPosition(line: 2),
+                end: TextPosition(line: 2)
+            ),
+            in: text
+        )
+        #expect(range == NSRange(location: 6, length: 5))
+    }
+
     @Test func wholeLineRangeExcludesNewlines() {
         let range = TextSelectionResolver.range(
             for: TextSelection(

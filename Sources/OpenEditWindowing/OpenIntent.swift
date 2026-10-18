@@ -35,10 +35,11 @@ public struct TextPosition: Equatable, Sendable {
     }
 }
 
-/// A resolved selection range from the CLI (ARCHITECTURE.md 5.1). Both
-/// endpoints are inclusive-ish AppKit positions: a nil column on the end
-/// endpoint means "end of that line", and the app converts the pair to an
-/// `NSRange`.
+/// A resolved selection from the CLI (ARCHITECTURE.md 5.1). `start == end` is a
+/// caret and always carries a concrete column; otherwise a nil column on the
+/// start endpoint means "start of that line" and on the end endpoint "end of
+/// that line (excluding its newline)". The app converts the pair to an
+/// `NSRange` via `TextSelectionResolver`.
 public struct TextSelection: Equatable, Sendable {
     public let start: TextPosition
     public let end: TextPosition
@@ -345,11 +346,18 @@ public enum OpenURLInterpreter {
 
     // MARK: - Position grammar (ARCHITECTURE.md 5.1)
 
-    /// `N` or `START-END`, both 1-based. Returns nil for zero, negatives,
-    /// inverted ranges, or anything else.
+    /// `N` (a single position) or `START-END` (a span), both 1-based. A single
+    /// position keeps `end == nil`, so the selection layer can tell a caret
+    /// (`file:12`) from an explicit one-line range (`file:12-12`, which selects
+    /// the whole line). Returns nil for zero, negatives, inverted ranges, or
+    /// anything else.
     private struct LineSpec: Equatable {
         let start: Int
-        let end: Int
+        /// nil for a single `N`; the span's last position (inclusive) otherwise.
+        let end: Int?
+
+        /// The raw value was a single `N`, not a `START-END` span.
+        var isSinglePosition: Bool { end == nil }
 
         init?(_ rawValue: String) {
             let parts = rawValue.split(separator: "-", omittingEmptySubsequences: false)
@@ -357,7 +365,7 @@ public enum OpenURLInterpreter {
             case 1:
                 guard let value = Int(parts[0]), value > 0 else { return nil }
                 start = value
-                end = value
+                end = nil
             case 2:
                 guard let start = Int(parts[0]), let end = Int(parts[1]),
                       start > 0, end > 0, start <= end
@@ -370,37 +378,26 @@ public enum OpenURLInterpreter {
         }
     }
 
+    /// The CLI grammar (ARCHITECTURE.md 5.1): a single position — `file:N[:COL]`,
+    /// `--line N`, `--col N` — is a caret; two lines or two columns select that
+    /// range, and a single column on a line range applies to both endpoints.
     private static func makeSelection(lineSpec: LineSpec?, colSpec: LineSpec?) -> TextSelection? {
         guard let lineSpec else {
             // A column without a line has no anchor; the shim never emits one.
             return nil
         }
 
-        if let colSpec {
-            let startColumn = colSpec.start
-            let endColumn = colSpec.end
-            if lineSpec.start == lineSpec.end {
-                return TextSelection(
-                    start: TextPosition(line: lineSpec.start, column: startColumn),
-                    end: TextPosition(line: lineSpec.end, column: endColumn)
-                )
-            }
-            return TextSelection(
-                start: TextPosition(line: lineSpec.start, column: startColumn),
-                end: TextPosition(line: lineSpec.end, column: endColumn)
-            )
-        }
-
-        if lineSpec.start == lineSpec.end {
-            return TextSelection(
-                start: TextPosition(line: lineSpec.start, column: nil),
-                end: TextPosition(line: lineSpec.end, column: nil)
-            )
+        // A caret carries a concrete column — the start of the line when none
+        // was given — because a nil column reads as "whole line" to the
+        // resolver, which would turn `file:12` into a highlight.
+        if lineSpec.isSinglePosition, colSpec?.isSinglePosition ?? true {
+            let position = TextPosition(line: lineSpec.start, column: colSpec?.start ?? 1)
+            return TextSelection(start: position, end: position)
         }
 
         return TextSelection(
-            start: TextPosition(line: lineSpec.start, column: nil),
-            end: TextPosition(line: lineSpec.end, column: nil)
+            start: TextPosition(line: lineSpec.start, column: colSpec?.start),
+            end: TextPosition(line: lineSpec.end ?? lineSpec.start, column: colSpec?.end ?? colSpec?.start)
         )
     }
 

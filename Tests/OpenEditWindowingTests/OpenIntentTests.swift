@@ -110,9 +110,55 @@ import Testing
         )
 
         #expect(request?.targets.map(\.selection) == [
-            TextSelection(start: TextPosition(line: 2), end: TextPosition(line: 2)),
+            TextSelection(start: TextPosition(line: 2, column: 1), end: TextPosition(line: 2, column: 1)),
             TextSelection(start: TextPosition(line: 40), end: TextPosition(line: 42)),
         ])
+    }
+
+    @Test func bareLinePositionIsACaretNotAWholeLineHighlight() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=12")!
+        )
+
+        // A single position places a caret; the concrete column keeps the
+        // resolver from reading nil as "whole line" (ARCHITECTURE.md 5.1).
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 12, column: 1),
+            end: TextPosition(line: 12, column: 1)
+        ))
+    }
+
+    @Test func explicitSingleLineRangeSelectsTheWholeLine() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=12-12")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 12),
+            end: TextPosition(line: 12)
+        ))
+    }
+
+    @Test func singleLineColumnRangeIsASpan() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=12&col=2-7")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 12, column: 2),
+            end: TextPosition(line: 12, column: 7)
+        ))
+    }
+
+    @Test func singleColumnOnALineRangeAppliesToBothEndpoints() {
+        let request = OpenURLInterpreter.interpret(
+            URL(string: "openedit://new-window?path=/tmp/a.txt&line=3-9&col=5")!
+        )
+
+        #expect(request?.targets.first?.selection == TextSelection(
+            start: TextPosition(line: 3, column: 5),
+            end: TextPosition(line: 9, column: 5)
+        ))
     }
 
     @Test func invalidPositionsRejectTheRequest() {
