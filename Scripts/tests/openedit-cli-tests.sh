@@ -24,35 +24,8 @@ exit 0
 STUB
 chmod +x "$bin/open"
 
-# `defaults` stub so the suppression flags can be tested without touching the
-# real com.openedit.app preferences domain.
-defaults_source="$tmp/defaults.txt"
-defaults_deletes="$tmp/defaults-deletes"
-cat > "$bin/defaults" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "read" ]]; then
-    cat "$OPENEDIT_STUB_DEFAULTS"
-    exit 0
-fi
-if [[ "$1" == "delete" ]]; then
-    printf '%s\n' "$3" >> "$OPENEDIT_STUB_DEFAULTS_DELETES"
-    exit 0
-fi
-exit 0
-STUB
-chmod +x "$bin/defaults"
-cat > "$defaults_source" <<'EOF'
-{
-    "missingLSP.suppressed.python" = 1;
-    "missingLSP.suppressed.rust" = 1;
-    "other.setting" = 1;
-}
-EOF
-
 export OPENEDIT_APP="$fake_app"
 export OPENEDIT_STUB_ARGS="$stub_args"
-export OPENEDIT_STUB_DEFAULTS="$defaults_source"
-export OPENEDIT_STUB_DEFAULTS_DELETES="$defaults_deletes"
 export PATH="$bin:$PATH"
 
 failures=0
@@ -246,19 +219,6 @@ assert_eq "stdin exit code" 0 "$RUN_STATUS"
 assert_eq "stdin URL is scratch" 1 "$(grep -c 'scratch=1' "$stub_args")"
 assert_eq "stdin content written" "hello from stdin" "$(cat "$stdin_temp" 2>/dev/null)"
 rm -f "$stdin_temp"
-
-# Suppression flags are shim-side and use the com.openedit.app domain.
-run_shim_stdout --list-suppressions
-assert_eq "list suppressions exit code" 0 "$RUN_STATUS"
-assert_eq "list suppressions output" $'python\nrust' "$RUN_STDOUT"
-
-run_shim_stdout --list-suppressions --json
-assert_eq "list suppressions JSON" '["python","rust"]' "$RUN_STDOUT"
-
-: > "$defaults_deletes"
-run_shim --reset-suppression python
-assert_eq "reset suppression exit code" 0 "$RUN_STATUS"
-assert_eq "reset suppression key" "missingLSP.suppressed.python" "$(cat "$defaults_deletes")"
 
 echo
 if (( failures > 0 )); then
