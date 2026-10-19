@@ -1,20 +1,19 @@
 import AppKit
-import OpenEditConfig
 import OpenEditLSP
 
-/// "Languages" tab of #51's Settings window (ARCHITECTURE.md 5.14): the
-/// per-language server dashboard over the same config snapshot and locator
-/// verdict the document-open path uses.
+/// "Languages" tab of #51's Settings window (ARCHITECTURE.md 5.14): a native
+/// table-based inventory of every known language with its server status, the
+/// resolved path or install command, and a trailing Copy action. Config origin
+/// and diagnostics live in the Configuration tab.
 final class ServersSettingsViewController: NSViewController {
     private enum Column {
         static let language = NSUserInterfaceItemIdentifier("language")
         static let server = NSUserInterfaceItemIdentifier("server")
-        static let notifications = NSUserInterfaceItemIdentifier("notifications")
+        static let action = NSUserInterfaceItemIdentifier("action")
     }
 
-    private let searchField = NSSearchField()
-    private let tableView = NSTableView()
     private let scrollView = NSScrollView()
+    private let tableView = NSTableView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let diagnosticsRow = NSStackView()
     private let diagnosticsLabel = NSTextField(labelWithString: "")
@@ -24,7 +23,7 @@ final class ServersSettingsViewController: NSViewController {
 
     private let onRecheck: () -> Void
     private let onShowConfiguration: () -> Void
-    private let onSetNotifications: (Bool, String) -> Void
+    private let onOpenConfig: () -> Void
     private let onHelp: () -> Void
     private let onDone: () -> Void
 
@@ -32,14 +31,14 @@ final class ServersSettingsViewController: NSViewController {
         model: LSPSettingsModel,
         onRecheck: @escaping () -> Void,
         onShowConfiguration: @escaping () -> Void,
-        onSetNotifications: @escaping (Bool, String) -> Void,
+        onOpenConfig: @escaping () -> Void,
         onHelp: @escaping () -> Void,
         onDone: @escaping () -> Void
     ) {
         self.model = model
         self.onRecheck = onRecheck
         self.onShowConfiguration = onShowConfiguration
-        self.onSetNotifications = onSetNotifications
+        self.onOpenConfig = onOpenConfig
         self.onHelp = onHelp
         self.onDone = onDone
         super.init(nibName: nil, bundle: nil)
@@ -57,41 +56,39 @@ final class ServersSettingsViewController: NSViewController {
         reloadRows()
     }
 
-    /// Re-render from a fresh config load. The search text is kept, so Re-check
-    /// does not clear an active filter.
+    /// Re-render from a fresh config load.
     func apply(model: LSPSettingsModel) {
         self.model = model
         updateDiagnostics()
         reloadRows()
     }
 
+    private func updateDiagnostics() {
+        let diagnostics = model.allDiagnostics
+        diagnosticsRow.isHidden = diagnostics.isEmpty
+        guard !diagnostics.isEmpty else { return }
+        diagnosticsLabel.stringValue = diagnostics.count == 1
+            ? "1 configuration issue"
+            : "\(diagnostics.count) configuration issues"
+    }
+
     // MARK: - Content
 
     private func buildContentView(in root: NSView) {
-        searchField.placeholderString = "Filter languages"
-        searchField.sendsSearchStringImmediately = true
-        searchField.target = self
-        searchField.action = #selector(searchChanged(_:))
-        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-
         let recheckButton = NSButton(title: "Re-check", target: self, action: #selector(recheck(_:)))
         recheckButton.bezelStyle = .rounded
         recheckButton.toolTip = "Reload languages.toml and check PATH again."
 
-        let searchSpacer = NSView()
-        searchSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let searchRow = NSStackView(views: [searchField, searchSpacer, recheckButton])
-        searchRow.orientation = .horizontal
-        searchRow.alignment = .centerY
-        searchRow.spacing = 8
+        let sectionLabel = NSTextField(labelWithString: "Language Servers")
+        sectionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        sectionLabel.textColor = .secondaryLabelColor
 
-        let hint = NSTextField(
-            labelWithString: "Servers are detected on your PATH. OpenEdit never installs them."
-        )
-        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        hint.textColor = .secondaryLabelColor
-        hint.lineBreakMode = .byTruncatingTail
-        hint.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let headerRow = NSStackView(views: [sectionLabel, headerSpacer, recheckButton])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 8
 
         let warningImage = NSImageView()
         warningImage.image = NSImage(
@@ -127,12 +124,11 @@ final class ServersSettingsViewController: NSViewController {
         diagnosticsRow.addArrangedSubview(reviewButton)
         diagnosticsRow.isHidden = true
 
-        let header = NSStackView(views: [searchRow, hint, diagnosticsRow])
-        header.orientation = .vertical
-        header.alignment = .width
-        header.spacing = 8
-        header.translatesAutoresizingMaskIntoConstraints = false
-        hint.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
+        let headerStack = NSStackView(views: [headerRow, diagnosticsRow])
+        headerStack.orientation = .vertical
+        headerStack.alignment = .width
+        headerStack.spacing = 8
+        headerStack.translatesAutoresizingMaskIntoConstraints = false
 
         configureTable()
         scrollView.documentView = tableView
@@ -156,18 +152,18 @@ final class ServersSettingsViewController: NSViewController {
 
         let bottomBar = SettingsBottomBar(onHelp: onHelp, onDone: onDone)
 
-        root.addSubview(header)
+        root.addSubview(headerStack)
         root.addSubview(scrollView)
         root.addSubview(emptyLabel)
         root.addSubview(footer)
         root.addSubview(bottomBar)
 
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            headerStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            headerStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            headerStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
 
-            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
+            scrollView.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 12),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -10),
@@ -196,85 +192,85 @@ final class ServersSettingsViewController: NSViewController {
         tableView.allowsMultipleSelection = false
         tableView.allowsEmptySelection = true
         tableView.style = .inset
-        tableView.rowHeight = 52
+        tableView.rowHeight = 56
         tableView.intercellSpacing = NSSize(width: 12, height: 2)
 
         let languageColumn = NSTableColumn(identifier: Column.language)
         languageColumn.title = "Language"
-        languageColumn.width = 230
+        languageColumn.width = 220
         languageColumn.minWidth = 170
         languageColumn.resizingMask = [.userResizingMask]
         tableView.addTableColumn(languageColumn)
 
         let serverColumn = NSTableColumn(identifier: Column.server)
         serverColumn.title = "Server"
-        serverColumn.width = 420
+        serverColumn.width = 380
         serverColumn.minWidth = 240
         serverColumn.resizingMask = [.autoresizingMask, .userResizingMask]
         tableView.addTableColumn(serverColumn)
 
-        let notificationsColumn = NSTableColumn(identifier: Column.notifications)
-        notificationsColumn.title = "Notify"
-        notificationsColumn.width = 70
-        notificationsColumn.minWidth = 70
-        notificationsColumn.maxWidth = 90
-        notificationsColumn.resizingMask = [.userResizingMask]
-        tableView.addTableColumn(notificationsColumn)
-    }
-
-    // MARK: - Reload
-
-    private func updateDiagnostics() {
-        let diagnostics = model.allDiagnostics
-        diagnosticsRow.isHidden = diagnostics.isEmpty
-        guard !diagnostics.isEmpty else { return }
-        diagnosticsLabel.stringValue = diagnostics.count == 1
-            ? "1 configuration issue"
-            : "\(diagnostics.count) configuration issues"
+        let actionColumn = NSTableColumn(identifier: Column.action)
+        actionColumn.title = ""
+        actionColumn.width = 90
+        actionColumn.minWidth = 90
+        actionColumn.maxWidth = 110
+        actionColumn.resizingMask = [.userResizingMask]
+        tableView.addTableColumn(actionColumn)
     }
 
     private func reloadRows() {
-        displayedRows = model.rows(matching: searchField.stringValue)
+        displayedRows = model.rows()
         tableView.reloadData()
 
         emptyLabel.isHidden = !displayedRows.isEmpty
         if displayedRows.isEmpty {
-            emptyLabel.stringValue = searchField.stringValue.isEmpty
-                ? "No languages configured."
-                : "No languages match \u{201C}\(searchField.stringValue)\u{201D}."
+            emptyLabel.stringValue = "No languages configured."
         }
     }
 
-    // MARK: - Actions
-
-    @objc private func searchChanged(_ sender: NSSearchField) {
-        reloadRows()
-    }
-
-    @objc private func recheck(_ sender: Any?) {
-        onRecheck()
-    }
-
-    @objc private func reviewDiagnostics(_ sender: Any?) {
-        onShowConfiguration()
-    }
-
-    @objc private func toggleNotifications(_ sender: NSButton) {
-        guard let languageID = sender.identifier?.rawValue else { return }
-        onSetNotifications(sender.state == .on, languageID)
-    }
-
-    // MARK: - Table content
+    // MARK: - Table cells
 
     private func makeLanguageCell(for entry: LSPSettingsRow) -> NSView {
+        let cell = NSTableCellView()
+
         let nameLabel = NSTextField(labelWithString: entry.displayName)
         nameLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingTail
 
-        let nameRow = NSStackView(views: [nameLabel])
-        nameRow.orientation = .horizontal
-        nameRow.alignment = .centerY
-        nameRow.spacing = 4
+        let extensionsLabel = NSTextField(labelWithString: extensionsText(for: entry))
+        extensionsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        extensionsLabel.textColor = .secondaryLabelColor
+        extensionsLabel.lineBreakMode = .byTruncatingTail
+
+        let stack = NSStackView(views: [nameLabel, extensionsLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        cell.addSubview(stack)
+        cell.textField = nameLabel
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
+            stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func makeServerCell(for entry: LSPSettingsRow) -> NSView {
+        let cell = NSTableCellView()
+
+        let statusRow = NSStackView()
+        statusRow.orientation = .horizontal
+        statusRow.alignment = .centerY
+        statusRow.spacing = 4
+
+        let statusLabel = NSTextField(labelWithString: statusText(for: entry))
+        statusLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        statusLabel.textColor = statusColor(for: entry)
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusRow.addArrangedSubview(statusLabel)
 
         if !entry.diagnostics.isEmpty {
             let warningImage = NSImageView()
@@ -287,53 +283,27 @@ final class ServersSettingsViewController: NSViewController {
             warningImage.translatesAutoresizingMaskIntoConstraints = false
             warningImage.widthAnchor.constraint(equalToConstant: 13).isActive = true
             warningImage.heightAnchor.constraint(equalToConstant: 13).isActive = true
-            nameRow.insertArrangedSubview(warningImage, at: 0)
+            statusRow.addArrangedSubview(warningImage)
         }
-
-        let detail = languageDetail(for: entry)
-        let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.lineBreakMode = .byTruncatingTail
-        detailLabel.toolTip = detail
-
-        let stack = NSStackView(views: [nameRow, detailLabel])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 2
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let cell = NSTableCellView()
-        cell.addSubview(stack)
-        cell.textField = nameLabel
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
-            stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-        ])
-        return cell
-    }
-
-    private func makeServerCell(for entry: LSPSettingsRow) -> NSView {
-        let statusLabel = NSTextField(labelWithString: statusText(for: entry))
-        statusLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
-        statusLabel.textColor = statusColor(for: entry)
-        statusLabel.lineBreakMode = .byTruncatingMiddle
 
         let detail = serverDetail(for: entry)
         let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        // Paths and commands read best in the system monospaced face; prose
+        // states ("No install command configured") stay in the default face.
+        detailLabel.font = entry.copyValue != nil
+            ? .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            : .systemFont(ofSize: NSFont.smallSystemFontSize)
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byTruncatingMiddle
         detailLabel.toolTip = serverTooltip(for: entry)
+        detailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let stack = NSStackView(views: [statusLabel, detailLabel])
+        let stack = NSStackView(views: [statusRow, detailLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 2
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let cell = NSTableCellView()
         cell.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
@@ -343,80 +313,105 @@ final class ServersSettingsViewController: NSViewController {
         return cell
     }
 
-    private func makeNotificationsCell(for entry: LSPSettingsRow) -> NSView {
+    private func makeActionCell(for entry: LSPSettingsRow) -> NSView {
         let cell = NSTableCellView()
 
-        guard entry.canToggleNotifications else {
-            let dash = NSTextField(labelWithString: "\u{2014}")
-            dash.textColor = .tertiaryLabelColor
-            dash.toolTip = "\(entry.displayName) is highlighting-only; no missing-server notice is posted."
-            dash.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(dash)
-            NSLayoutConstraint.activate([
-                dash.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
-                dash.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-            ])
+        guard entry.copyValue != nil || entry.needsOpenConfigAction else {
             return cell
         }
 
-        let checkbox = NSButton(
-            checkboxWithTitle: "",
-            target: self,
-            action: #selector(toggleNotifications(_:))
-        )
-        checkbox.state = entry.isNotificationSuppressed ? .off : .on
-        checkbox.identifier = NSUserInterfaceItemIdentifier(entry.languageID)
-        checkbox.setAccessibilityLabel("Show missing server notice for \(entry.displayName)")
-        checkbox.toolTip = entry.isNotificationSuppressed
-            ? "The missing-server notice is dismissed for \(entry.displayName). Check to allow it again."
-            : "Uncheck to dismiss the missing-server notice for \(entry.displayName)."
-        checkbox.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(checkbox)
+        let button: NSButton
+        if entry.needsOpenConfigAction {
+            button = NSButton(title: "Open Config", target: self, action: #selector(openConfig(_:)))
+            button.setAccessibilityLabel("Open languages.toml to configure \(entry.displayName)")
+            button.toolTip = "No install command is configured for \(entry.displayName); add one in languages.toml."
+        } else {
+            button = NSButton(title: "Copy", target: self, action: #selector(copyRowValue(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier(entry.languageID)
+            switch entry.status {
+            case .available:
+                button.setAccessibilityLabel("Copy the \(entry.displayName) server path")
+                button.toolTip = "Copy the resolved server path."
+            case .missing:
+                button.setAccessibilityLabel("Copy the \(entry.displayName) install command")
+                button.toolTip = "Copy the install command."
+            case .highlightingOnly:
+                break
+            }
+        }
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(button)
         NSLayoutConstraint.activate([
-            checkbox.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
-            checkbox.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            button.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            button.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            button.leadingAnchor.constraint(greaterThanOrEqualTo: cell.leadingAnchor, constant: 4)
         ])
         return cell
+    }
+
+    // MARK: - Actions
+
+    @objc private func recheck(_ sender: Any?) {
+        onRecheck()
+    }
+
+    @objc private func reviewDiagnostics(_ sender: Any?) {
+        onShowConfiguration()
+    }
+
+    @objc private func openConfig(_ sender: NSButton) {
+        onOpenConfig()
+    }
+
+    @objc private func copyRowValue(_ sender: NSButton) {
+        guard let languageID = sender.identifier?.rawValue,
+              let entry = displayedRows.first(where: { $0.languageID == languageID }),
+              let value = entry.copyValue
+        else { return }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(value, forType: .string)
+
+        sender.title = "Copied"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak sender] in
+            sender?.title = "Copy"
+        }
     }
 
     // MARK: - Row text
 
-    private func languageDetail(for entry: LSPSettingsRow) -> String {
-        guard entry.origin != nil else {
-            return "Dismissed notice kept"
+    private func extensionsText(for entry: LSPSettingsRow) -> String {
+        guard !entry.extensions.isEmpty else {
+            return "No extensions"
         }
-
-        var parts: [String] = []
-        if !entry.extensions.isEmpty {
-            parts.append(entry.extensions.map { ".\($0)" }.joined(separator: ", "))
-        }
-        if let origin = entry.origin {
-            parts.append(originLabel(for: origin))
-        }
-        return parts.isEmpty ? "No extensions" : parts.joined(separator: " \u{00B7} ")
-    }
-
-    private func originLabel(for origin: LSPSettingsOrigin) -> String {
-        switch origin {
-        case .bundled:
-            return "Bundled"
-        case .userConfig:
-            return "Your config"
-        case .autodetected:
-            return "Autodetected"
-        }
+        return entry.extensions.map { ".\($0)" }.joined(separator: ", ")
     }
 
     private func statusText(for entry: LSPSettingsRow) -> String {
         switch entry.status {
         case .available:
-            return "Ready"
+            return "Server ready"
         case .missing:
-            return "Not installed"
+            return "Server not installed"
         case .highlightingOnly:
             return "Highlighting only"
-        case .noLongerConfigured:
-            return "No longer configured"
+        }
+    }
+
+    private func statusImage(for entry: LSPSettingsRow) -> NSImage? {
+        switch entry.status {
+        case .available:
+            return NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Ready")
+        case .missing:
+            return NSImage(
+                systemSymbolName: "exclamationmark.triangle.fill",
+                accessibilityDescription: "Not installed"
+            )
+        case .highlightingOnly:
+            return NSImage(systemSymbolName: "highlighter", accessibilityDescription: "Highlighting only")
         }
     }
 
@@ -426,7 +421,7 @@ final class ServersSettingsViewController: NSViewController {
             return .systemGreen
         case .missing:
             return .systemOrange
-        case .highlightingOnly, .noLongerConfigured:
+        case .highlightingOnly:
             return .secondaryLabelColor
         }
     }
@@ -436,20 +431,12 @@ final class ServersSettingsViewController: NSViewController {
         case .available(let executablePath):
             return executablePath
         case .missing:
-            if let lspPath = entry.lspPath, !lspPath.isEmpty {
-                return "Not found at \(lspPath)"
+            if entry.hasInstallCommand, let installCommand = entry.installCommand {
+                return installCommand
             }
-            if let installCommand = entry.installCommand, !installCommand.isEmpty {
-                return "Install with: \(installCommand)"
-            }
-            if !entry.probedBinaries.isEmpty {
-                return "Tried: \(entry.probedBinaries.joined(separator: ", "))"
-            }
-            return "The configured server was not found on PATH."
+            return "No install command configured"
         case .highlightingOnly:
-            return "No server configured; highlighting only."
-        case .noLongerConfigured:
-            return "This language has no config entry; its notice stays dismissed."
+            return "No language server configured."
         }
     }
 
@@ -484,8 +471,8 @@ extension ServersSettingsViewController: NSTableViewDataSource, NSTableViewDeleg
             return makeLanguageCell(for: entry)
         case Column.server:
             return makeServerCell(for: entry)
-        case Column.notifications:
-            return makeNotificationsCell(for: entry)
+        case Column.action:
+            return makeActionCell(for: entry)
         default:
             return nil
         }

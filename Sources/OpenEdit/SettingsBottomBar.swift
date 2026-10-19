@@ -64,3 +64,11 @@ final class SettingsBottomBar: NSView {
         onDone()
     }
 }
+
+/// Top-left-origin document view for scroll views whose content is shorter than
+/// the clip view.
+final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool {
+        true
+    }
+}

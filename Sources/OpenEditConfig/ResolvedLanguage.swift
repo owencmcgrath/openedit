@@ -25,7 +25,7 @@ public struct ResolvedLanguage: Equatable, Sendable {
     /// LSP for this language (5.2).
     public let binaryName: String?
 
-    /// Human-readable command shown in the missing-LSP notification (5.6).
+    /// Human-readable command shown when the server is missing (5.6/5.14).
     /// Inert text — the app never runs it.
     public let installCommand: String?
 

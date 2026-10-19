@@ -29,7 +29,8 @@ public struct KnownServer: Equatable, Sendable {
     /// executable wins (ARCHITECTURE.md 5.6).
     public let candidates: [String]
 
-    /// Human-readable command shown in the missing-LSP notice. Inert text — the
+    /// Human-readable command shown in Settings → Languages when the server is
+    /// missing. Inert text — the
     /// app never runs it.
     public let installCommand: String?
 

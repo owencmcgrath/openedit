@@ -55,15 +55,12 @@ final class SettingsWindowController: NSWindowController {
             model: model,
             onRecheck: { [weak self] in self?.reload() },
             onShowConfiguration: { [weak self] in self?.showConfiguration() },
-            onSetNotifications: { [weak self] enabled, languageID in
-                self?.setNotifications(enabled, for: languageID)
-            },
+            onOpenConfig: { [weak self] in self?.openConfigFile() },
             onHelp: { [weak self] in self?.showHelp() },
             onDone: { [weak self] in self?.done() }
         )
         let configuration = ConfigurationSettingsViewController(
             model: model,
-            onRecheck: { [weak self] in self?.reload() },
             onOpenConfig: { [weak self] in self?.openConfigFile() },
             onHelp: { [weak self] in self?.showHelp() },
             onDone: { [weak self] in self?.done() }
@@ -110,12 +107,6 @@ final class SettingsWindowController: NSWindowController {
         configurationViewController?.apply(model: model)
     }
 
-    private func setNotifications(_ enabled: Bool, for languageID: String) {
-        model.setNotificationsEnabled(enabled, for: languageID)
-        serversViewController?.apply(model: model)
-        configurationViewController?.apply(model: model)
-    }
-
     // MARK: - Actions
 
     private func done() {
@@ -157,8 +148,8 @@ final class SettingsWindowController: NSWindowController {
         alert.informativeText = "OpenEdit detects language servers on your PATH and never installs them. "
             + "The bundled known-server catalog adds autodetection for common languages. "
             + "Your languages.toml overrides bundled mappings; invalid entries are skipped and "
-            + "listed in Configuration. The Notify checkbox controls the per-language "
-            + "\u{201C}server not installed\u{201D} notice."
+            + "listed in Configuration. Copy on a row puts the resolved server path or install "
+            + "command on the clipboard."
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Open Configuration")
 

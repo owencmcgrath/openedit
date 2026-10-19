@@ -98,7 +98,8 @@ public enum LanguageServerLocator {
 
         // Catalog autodetection: probe the ordered candidates, first hit wins.
         // All-missing is still a configured-in-spirit server, so it gets the
-        // same missing notice keyed by this language's `languageId` (5.6).
+        // All-missing is still a configured-in-spirit server, so the Settings
+        // inventory shows it as "Server not installed" (5.14).
         if !language.binaryAlternatives.isEmpty {
             for candidate in language.binaryAlternatives where !candidate.isEmpty {
                 if let executablePath = findExecutable(
