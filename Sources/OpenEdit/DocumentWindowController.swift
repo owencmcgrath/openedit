@@ -1,0 +1,400 @@
+import AppKit
+import OpenEditHighlighting
+import OpenEditLSP
+import OpenEditWindowing
+
+/// Window for one open document: the text view, scroll view, and gutter, with
+/// user edits forwarded to the TextDocument for standard NSDocument dirty
+/// tracking (ARCHITECTURE.md 5.11) and reloads pushed back in from the
+/// document's watcher (5.3).
+///
+/// The window also owns the tree-sitter highlighter (5.4): `NSTextStorage`
+/// character edits drive an incremental re-highlight, while the highlighter's
+/// own attribute edits are ignored so they never register as document changes
+/// or fight undo/find styling.
+final class DocumentWindowController: NSWindowController, NSTextViewDelegate, NSTextStorageDelegate {
+    /// Shared tabbing identifier so the app can group document windows into one
+    /// native tab group when a file reuses the frontmost window
+    /// (ARCHITECTURE.md 5.1).
+    static let tabbingIdentifier = "OpenEditDocument"
+
+    private let textStorage: NSTextStorage
+    private let layoutManager: NSLayoutManager
+    private let scrollView: NSScrollView
+    private let textView: NSTextView
+    private let lineNumberRuler: LineNumberRulerView
+    private let highlighter: TreeSitterHighlighter
+
+    /// Diagnostics for this document (ARCHITECTURE.md 5.9), invalidated on
+    /// every edit so underlines never describe stale text.
+    private var diagnostics = DocumentDiagnostics()
+    private let hoverPresenter = HoverPresenter()
+    private var hoverTask: Task<Void, Never>?
+
+    /// Guard so programmatic text application (initial load, silent reload,
+    /// reload from the conflict prompt) is not counted as a user edit.
+    private var isApplyingDocumentText = false
+
+    /// The CLI jump/selection is applied once, on first show; later shows must
+    /// not steal the user's current selection.
+    private var hasAppliedInitialSelection = false
+
+    /// Guard so attribute writes performed by the highlighter are not treated as
+    /// user edits (they arrive as `didProcessEditing` with `.editedAttributes`).
+    private var isApplyingHighlight = false
+
+    /// Last file URL whose type icon was applied to the window, so the
+    /// per-keystroke `synchronizeWindowTitleWithDocumentName()` pass doesn't
+    /// re-query LaunchServices on every edit.
+    private var iconFileURL: URL?
+
+    var textDocument: TextDocument? {
+        document as? TextDocument
+    }
+
+    init(document: TextDocument) {
+        let textStorage = NSTextStorage()
+        self.textStorage = textStorage
+        let layoutManager = NSLayoutManager()
+        self.layoutManager = layoutManager
+        textStorage.addLayoutManager(layoutManager)
+
+        let textContainer = NSTextContainer(
+            size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        )
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+
+        let editorTextView = EditorTextView(frame: .zero, textContainer: textContainer)
+        textView = editorTextView
+        editorTextView.minSize = NSSize(width: 0, height: 0)
+        editorTextView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        editorTextView.isVerticallyResizable = true
+        editorTextView.isHorizontallyResizable = false
+        editorTextView.autoresizingMask = [.width]
+        editorTextView.textContainerInset = NSSize(width: 4, height: 4)
+        editorTextView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        editorTextView.allowsUndo = true
+        editorTextView.isRichText = false
+        editorTextView.isAutomaticQuoteSubstitutionEnabled = false
+        editorTextView.isAutomaticDashSubstitutionEnabled = false
+        editorTextView.isAutomaticTextReplacementEnabled = false
+        editorTextView.isAutomaticSpellingCorrectionEnabled = false
+        editorTextView.usesFindBar = true
+        editorTextView.isIncrementalSearchingEnabled = true
+
+        scrollView = NSScrollView(frame: .zero)
+        scrollView.documentView = editorTextView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .noBorder
+        scrollView.autohidesScrollers = true
+
+        // Per-document CLI options (ARCHITECTURE.md 5.1, #46). Defaults leave
+        // AppKit's stock editing behavior untouched.
+        let options = document.openOptions
+        editorTextView.isEditable = !options.readOnly
+        if let wrapsLines = options.wrapsLines {
+            editorTextView.isHorizontallyResizable = !wrapsLines
+            textContainer.widthTracksTextView = wrapsLines
+            scrollView.hasHorizontalScroller = !wrapsLines
+        }
+        if let tabSize = options.tabSize, tabSize > 0 {
+            editorTextView.defaultParagraphStyle = Self.paragraphStyle(
+                tabSize: tabSize,
+                font: editorTextView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            )
+        }
+
+        // GitHub editor surface (ARCHITECTURE.md 5.8): the theme's canvas,
+        // foreground, caret, and selection replace the AppKit defaults, so a
+        // document window reads like GitHub's own editor in both appearances.
+        editorTextView.backgroundColor = GitHubPalette.editorBackground
+        editorTextView.textColor = GitHubPalette.foreground
+        editorTextView.insertionPointColor = GitHubPalette.cursor
+        editorTextView.selectedTextAttributes = [
+            .backgroundColor: GitHubPalette.selection
+        ]
+        scrollView.backgroundColor = GitHubPalette.editorBackground
+        scrollView.drawsBackground = true
+
+        lineNumberRuler = LineNumberRulerView(textView: editorTextView, scrollView: scrollView)
+        scrollView.verticalRulerView = lineNumberRuler
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = scrollView
+        if let size = document.openOptions.windowSize {
+            window.setContentSize(NSSize(width: size.width, height: size.height))
+        }
+        if let position = document.openOptions.windowPosition {
+            window.setFrameOrigin(NSPoint(x: position.x, y: position.y))
+        } else {
+            window.center()
+        }
+        if document.openOptions.windowSize == nil, document.openOptions.windowPosition == nil {
+            window.setFrameAutosaveName("OpenEditDocumentWindow")
+        }
+        window.tabbingIdentifier = Self.tabbingIdentifier
+        window.title = document.displayName
+
+        let grammarRegistry: GrammarRegistry
+        if let grammarDirectory = document.openOptions.grammarDirectory {
+            grammarRegistry = GrammarRegistry(
+                queriesRootDirectory: URL(fileURLWithPath: grammarDirectory)
+            )
+        } else {
+            grammarRegistry = .shared
+        }
+        highlighter = TreeSitterHighlighter(
+            grammarName: DocumentLanguageMapping.grammarName(
+                for: document.fileURL,
+                options: document.openOptions
+            ),
+            fileExtension: document.fileURL?.pathExtension,
+            registry: grammarRegistry
+        )
+
+        super.init(window: window)
+
+        editorTextView.string = document.text
+        // Setting `string` programmatically posts no text-change notification
+        // the ruler observes (see LineNumberRulerView.invalidate()), so drop
+        // the cache that init computed against the empty view.
+        lineNumberRuler.invalidate()
+        editorTextView.undoManager?.removeAllActions()
+        editorTextView.delegate = self
+        editorTextView.onMouseMoved = { [weak self] point in
+            self?.handleMouseMoved(point)
+        }
+        editorTextView.diagnosticMessageProvider = { [weak self] index in
+            self?.diagnosticMessage(atUTF16Offset: index)
+        }
+        highlightAll()
+        // Set last: the highlighter's own attribute writes must not be observed
+        // as edits, and the initial full highlight is not a user edit.
+        textStorage.delegate = self
+        refreshDocumentIcon()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Apply the CLI's initial jump/selection once the window exists. Safe to
+    /// call more than once; the document's initial selection is only consumed
+    /// on first show.
+    func applyInitialSelection() {
+        guard !hasAppliedInitialSelection,
+              let selection = textDocument?.initialSelection
+        else { return }
+        hasAppliedInitialSelection = true
+        let range = TextSelectionResolver.range(for: selection, in: textView.string)
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
+        window?.makeFirstResponder(textView)
+    }
+
+    private static func paragraphStyle(tabSize: Int, font: NSFont) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        let spaceWidth = (" " as NSString).size(withAttributes: [.font: font]).width
+        style.defaultTabInterval = spaceWidth * CGFloat(tabSize)
+        style.tabStops = []
+        return style
+    }
+
+    /// `--expand-tabs`: insert spaces to the next tab stop instead of a tab
+    /// character. Delegate return `true` means the command was handled.
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.insertTab(_:)),
+              textDocument?.openOptions.expandTabs == true
+        else { return false }
+
+        let tabSize = textDocument?.openOptions.tabSize ?? 4
+        let string = textView.string as NSString
+        let location = textView.selectedRange().location
+        let lineRange = string.lineRange(for: NSRange(location: location, length: 0))
+        let column = max(0, location - lineRange.location)
+        let spaces = tabSize - (column % tabSize)
+        textView.insertText(
+            String(repeating: " ", count: spaces),
+            replacementRange: textView.selectedRange()
+        )
+        return true
+    }
+
+    /// Keep the title-bar proxy icon in step with the document's file URL.
+    /// AppKit calls this whenever the document's display name or dirty state
+    /// changes, which is exactly when Save As hands the document its `fileURL`.
+    override func synchronizeWindowTitleWithDocumentName() {
+        super.synchronizeWindowTitleWithDocumentName()
+        refreshDocumentIcon()
+    }
+
+    /// Show the macOS-provided icon for the file's type in the title bar
+    /// (ARCHITECTURE.md 5.12). Presentation only — `TextDocument.fileType`
+    /// stays `public.plain-text` (5.11), so saving is unaffected. Untitled
+    /// documents (no `fileURL`) clear the proxy icon and show nothing; the
+    /// generic fallback comes from LaunchServices for unclaimed extensions.
+    private func refreshDocumentIcon() {
+        guard let window else { return }
+        let fileURL = textDocument?.fileURL
+        guard fileURL != iconFileURL else { return }
+        iconFileURL = fileURL
+        window.representedURL = fileURL
+        guard let fileURL else { return }
+        window.standardWindowButton(.documentIconButton)?.image =
+            NSWorkspace.shared.icon(forFile: fileURL.path)
+    }
+
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        window?.makeFirstResponder(textView)
+        applyInitialSelection()
+    }
+
+    /// Push disk-derived text into the view, clearing undo history that would
+    /// otherwise try to undo edits into a document that no longer contains
+    /// them. (The initializer reads document.text directly; this covers
+    /// watcher-driven reloads.)
+    func applyText(_ newText: String) {
+        isApplyingDocumentText = true
+        textView.string = newText
+        // Same notification gap as the initial load: invalidate explicitly
+        // rather than waiting for a keystroke to fix the numbering.
+        lineNumberRuler.invalidate()
+        textView.undoManager?.removeAllActions()
+        highlightAll()
+        isApplyingDocumentText = false
+        clearDiagnostics()
+    }
+
+    // MARK: - Highlighting (ARCHITECTURE.md 5.4)
+
+    private func highlightAll() {
+        isApplyingHighlight = true
+        highlighter.highlightAll(in: textStorage)
+        isApplyingHighlight = false
+    }
+
+    /// Called after a character edit. The highlighter reparses incrementally and
+    /// re-attributes only the affected range; `.editedAttributes` rounds (the
+    /// highlighter's own writes) are ignored.
+    func textStorage(
+        _ textStorage: NSTextStorage,
+        didProcessEditing editedMask: NSTextStorageEditActions,
+        range editedRange: NSRange,
+        changeInLength delta: Int
+    ) {
+        guard editedMask.contains(.editedCharacters),
+              !isApplyingDocumentText,
+              !isApplyingHighlight
+        else { return }
+
+        // Every user edit invalidates the gutter's cached line starts before
+        // the highlighter runs, so the numbering and digit width track the new
+        // text even if nothing else redraws (see LineNumberRulerView.invalidate()).
+        lineNumberRuler.invalidate()
+        isApplyingHighlight = true
+        highlighter.applyEdit(in: textStorage, editedRange: editedRange, changeInLength: delta)
+        isApplyingHighlight = false
+        clearDiagnostics()
+    }
+
+    func textDidChange(_ notification: Notification) {
+        guard !isApplyingDocumentText, !isApplyingHighlight, let textDocument else { return }
+        textDocument.noteTextEdited(textView.string)
+    }
+
+    // MARK: - Diagnostics and hover (ARCHITECTURE.md 5.5, 5.9)
+
+    /// Accept a `publishDiagnostics` notification for this document. Pushes
+    /// for other documents, docs the pool no longer serves, and pushes whose
+    /// version does not match what the client last sent are ignored.
+    func applyDiagnostics(_ publish: DiagnosticsPublish) {
+        guard let fileURL = textDocument?.fileURL,
+              publish.uri == FileURI.make(from: fileURL),
+              let version = LanguageServerPool.shared.trackedVersion(fileURL: fileURL)
+        else { return }
+        guard diagnostics.accept(publish, currentVersion: version) else { return }
+        renderDiagnostics()
+    }
+
+    private func clearDiagnostics() {
+        hoverPresenter.dismiss()
+        guard !diagnostics.diagnostics.isEmpty else { return }
+        diagnostics.invalidate()
+        renderDiagnostics()
+    }
+
+    private func renderDiagnostics() {
+        let text = textView.string as NSString
+        DiagnosticUnderliner.apply(
+            diagnostics.renderable(in: text),
+            to: layoutManager,
+            textLength: text.length
+        )
+    }
+
+    private func diagnosticMessage(atUTF16Offset index: Int) -> String? {
+        diagnostics.diagnostic(atUTF16Offset: index, in: textView.string as NSString)?.message
+    }
+
+    /// Pointer moved in the text view: show a diagnostic's message directly, or
+    /// (debounced) ask the server for hover text. The request is async, so
+    /// typing is never blocked; a response that loses a race with an edit or a
+    /// new pointer position is dropped.
+    private func handleMouseMoved(_ point: NSPoint) {
+        hoverTask?.cancel()
+        hoverTask = nil
+
+        guard point.x >= 0, let fileURL = textDocument?.fileURL,
+              let textContainer = textView.textContainer
+        else {
+            hoverPresenter.dismiss()
+            return
+        }
+
+        let string = textView.string as NSString
+        let origin = textView.textContainerOrigin
+        let containerPoint = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let index = layoutManager.characterIndex(
+            for: containerPoint,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+
+        if let diagnostic = diagnostics.diagnostic(atUTF16Offset: index, in: string) {
+            hoverPresenter.show(diagnostic.message, at: point, in: textView)
+            return
+        }
+
+        guard let version = LanguageServerPool.shared.trackedVersion(fileURL: fileURL) else {
+            hoverPresenter.dismiss()
+            return
+        }
+        let position = LSPPosition(utf16Offset: index, in: string)
+        hoverTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard let text = await LanguageServerPool.shared.requestHover(fileURL: fileURL, position: position),
+                  !Task.isCancelled,
+                  LanguageServerPool.shared.trackedVersion(fileURL: fileURL) == version
+            else {
+                self.hoverPresenter.dismiss()
+                return
+            }
+            self.hoverPresenter.show(text, at: point, in: self.textView)
+        }
+    }
+}
