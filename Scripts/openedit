@@ -92,10 +92,8 @@ Developer
       --debug                Debug logging plus verbose shim output
       --dry-run              Print the open command instead of running it
       --json                 Machine-readable output for informational commands
-                             (version, suppressions, app path, selftest, dry-run)
+                             (version, app path, selftest, dry-run)
       --print-app-path       Print the resolved app path and exit
-      --list-suppressions    List dismissed missing-LSP languages
-      --reset-suppression ID Clear one dismissed language
       --app PATH             Use this OpenEdit.app (alias: --app-path)
       --selftest             Check the shim's app/launch plumbing
 EOF
@@ -236,23 +234,6 @@ parse_file_argument() {
     fi
 }
 
-suppressed_language_ids() {
-    defaults read com.openedit.app 2>/dev/null \
-        | sed -n 's/^[[:space:]]*"missingLSP\.suppressed\.\([^"]*\)"[[:space:]]*=[[:space:]]*1;.*/\1/p' \
-        | sort
-}
-
-print_suppressions_json() {
-    local first=1 id
-    printf '['
-    while IFS= read -r id; do
-        [[ -n "$id" ]] || continue
-        if (( first )); then first=0; else printf ','; fi
-        printf '"%s"' "$(json_escape "$id")"
-    done < <(suppressed_language_ids)
-    printf ']'
-}
-
 # --- Flag parsing ----------------------------------------------------------
 
 # Split `--flag=value` into two arguments up front so the loop below can treat
@@ -290,8 +271,6 @@ wrap=""
 expand_tabs=0
 debug=0
 json_output=0
-list_suppressions=0
-reset_suppression=""
 version_requested=0
 app_override=""
 config_path=""
@@ -524,15 +503,6 @@ while (( $# )); do
             verbose=1
             shift
             ;;
-        --list-suppressions)
-            list_suppressions=1
-            shift
-            ;;
-        --reset-suppression)
-            (( $# >= 2 )) || die "--reset-suppression requires a language ID" 2
-            reset_suppression="$2"
-            shift 2
-            ;;
         --goto)
             (( $# >= 2 )) || die "--goto requires SPEC" 2
             goto_spec="$2"
@@ -594,26 +564,6 @@ if (( version_requested )); then
         printf '{"name":"openedit","version":"%s"}\n' "$(json_escape "$version")"
     else
         printf 'openedit %s\n' "$version"
-    fi
-    exit 0
-fi
-
-if (( list_suppressions )); then
-    if (( json_output )); then
-        print_suppressions_json
-        printf '\n'
-    else
-        suppressed_language_ids
-    fi
-    exit 0
-fi
-
-if [[ -n "$reset_suppression" ]]; then
-    defaults delete com.openedit.app "missingLSP.suppressed.$reset_suppression" >/dev/null 2>&1 || true
-    if (( json_output )); then
-        printf '{"reset":"%s"}\n' "$(json_escape "$reset_suppression")"
-    elif (( ! quiet )); then
-        printf 'reset %s\n' "$reset_suppression"
     fi
     exit 0
 fi
