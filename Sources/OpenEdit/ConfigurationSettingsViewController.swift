@@ -9,7 +9,6 @@ final class ConfigurationSettingsViewController: NSViewController {
     private let configURL = LanguageConfigLoader.defaultUserConfigURL
 
     private let configPathLabel = NSTextField(labelWithString: "")
-    private let configStatusLabel = NSTextField(wrappingLabelWithString: "")
     private let originLabel = NSTextField(labelWithString: "")
     private let diagnosticsStack = NSStackView()
     private let diagnosticsScrollView = NSScrollView()
@@ -74,17 +73,6 @@ final class ConfigurationSettingsViewController: NSViewController {
         pathRow.orientation = .horizontal
         pathRow.alignment = .centerY
         pathRow.spacing = 12
-
-        configStatusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        configStatusLabel.textColor = .secondaryLabelColor
-        configStatusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let explanation = NSTextField(
-            wrappingLabelWithString: "OpenEdit reads this file over the bundled mappings and never writes it. "
-                + "Invalid entries are skipped and listed below."
-        )
-        explanation.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        explanation.textColor = .secondaryLabelColor
 
         originLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         originLabel.textColor = .secondaryLabelColor
@@ -166,8 +154,6 @@ final class ConfigurationSettingsViewController: NSViewController {
         let contentStack = NSStackView(views: [
             configHeaderRow,
             pathRow,
-            configStatusLabel,
-            explanation,
             originLabel,
             separator(),
             issuesLabel,
@@ -178,7 +164,7 @@ final class ConfigurationSettingsViewController: NSViewController {
         contentStack.spacing = 8
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
-        for label in [configHeaderRow, configStatusLabel, explanation, originLabel, issuesLabel] {
+        for label in [configHeaderRow, originLabel, issuesLabel] {
             label.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         }
 
@@ -231,11 +217,6 @@ final class ConfigurationSettingsViewController: NSViewController {
     // MARK: - Content state
 
     private func updateContent() {
-        let fileExists = FileManager.default.fileExists(atPath: configURL.path)
-        configStatusLabel.stringValue = fileExists
-            ? "Using your config file."
-            : "No user config file; bundled defaults and the known-server catalog are in use."
-
         let rows = model.rows()
         let origins = rows.map(\.origin)
         let bundled = origins.filter { $0 == .bundled }.count
