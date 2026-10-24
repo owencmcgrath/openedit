@@ -85,7 +85,8 @@ public enum LanguageConfigLoader {
                         configPath: configPath,
                         message: "Could not read config file: \(error.localizedDescription)"
                     )
-                ]
+                ],
+                userLanguages: []
             )
         }
 
@@ -121,7 +122,8 @@ public enum LanguageConfigLoader {
                         configPath: configPath,
                         message: "Invalid TOML: \(error)"
                     )
-                ]
+                ],
+                userLanguages: []
             )
         }
 
@@ -150,7 +152,8 @@ public enum LanguageConfigLoader {
                 userLanguages: userLanguages,
                 userKnownServers: userKnownServers
             ),
-            diagnostics: diagnostics
+            diagnostics: diagnostics,
+            userLanguages: userLanguages
         )
     }
 
@@ -579,14 +582,20 @@ public enum LanguageConfigLoader {
                 userLanguages: [],
                 userKnownServers: []
             ),
-            diagnostics: []
+            diagnostics: [],
+            userLanguages: []
         )
     }
 
     private static func result(
         languages: [ResolvedLanguage],
-        diagnostics: [LanguageConfigDiagnostic]
+        diagnostics: [LanguageConfigDiagnostic],
+        userLanguages: [ResolvedLanguage]
     ) -> LanguageConfigLoadResult {
-        LanguageConfigLoadResult(registry: LanguageRegistry(languages: languages), diagnostics: diagnostics)
+        LanguageConfigLoadResult(
+            registry: LanguageRegistry(languages: languages),
+            diagnostics: diagnostics,
+            userConfiguredLanguageIDs: Set(userLanguages.map(\.languageID))
+        )
     }
 }

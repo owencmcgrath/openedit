@@ -57,7 +57,7 @@ enum DocumentLanguageMapping {
         return resolvedLanguage(for: fileURL, options: options)?.grammar
     }
 
-    /// The full resolved entry for a file, used by the missing-LSP path (5.6)
+    /// The full resolved entry for a file, used by the language-server path (5.6)
     /// which needs `binaryName`/`lspPath`/`installCommand`, not just `grammar`.
     ///
     /// CLI overrides are applied to a copy of the registry entry, so one

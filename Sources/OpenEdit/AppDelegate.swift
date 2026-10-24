@@ -140,10 +140,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppDelegate.routeServerNotification(message)
         }
 
-        // Request notification authorization at first launch (ARCHITECTURE.md
-        // 5.6); denial never blocks opening files. The notifier also asks again
-        // lazily before a notice, in case this runs before the user decides.
-        MissingLSPServerNotification.shared.start()
+        // #51 removed the missing-LSP notification feature; sweep the orphaned
+        // "Don't show again" keys it wrote so they do not linger in user
+        // defaults forever. (The key prefix was MissingLSPSuppressionStore's.)
+        let defaults = UserDefaults.standard
+        for key in defaults.dictionaryRepresentation().keys
+        where key.hasPrefix("missingLSP.suppressed.") {
+            defaults.removeObject(forKey: key)
+        }
 
         for url in launchArgumentURLs() {
             openFile(at: url, intent: .reuseExistingWindow, options: OpenDocumentOptions())

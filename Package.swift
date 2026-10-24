@@ -83,13 +83,11 @@ let package = Package(
             ],
             path: "Sources/OpenEditHighlighting"
         ),
-        // Missing-LSP detection and notification policy (ARCHITECTURE.md 5.6).
-        // Split out from the AppKit shell for the same reason as the config and
-        // highlighting modules: PATH/literal-path resolution, per-language
-        // suppression persistence, and the "when to notify" policy are testable
-        // with a controlled PATH and a notification spy, no window or real
-        // `UserNotifications` needed. #6's process pool consumes the same
-        // `LanguageServerAvailability` result this produces.
+        // Language-server availability (ARCHITECTURE.md 5.6). Split out from
+        // the AppKit shell for the same reason as the config and highlighting
+        // modules: PATH/literal-path resolution is testable with a controlled
+        // PATH, no window needed. #6's process pool and #51's Settings
+        // inventory consume the same `LanguageServerAvailability` result.
         .target(
             name: "OpenEditLSP",
             dependencies: ["OpenEditConfig", "OpenEditLog"],

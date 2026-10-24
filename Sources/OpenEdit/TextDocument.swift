@@ -157,8 +157,9 @@ final class TextDocument: NSDocument {
 
     /// One document-open event for the language-server side (ARCHITECTURE.md
     /// 5.5/5.6): resolve the config entry and the server's availability once,
-    /// hand the single verdict to both the missing-LSP notice (#7) and the
-    /// process pool (#6), so one open cannot both warn and launch.
+    /// and hand that single verdict to the process pool (#6). The Settings
+    /// window's Languages tab re-resolves the same way when it refreshes, so an
+    /// open and the inventory cannot disagree about what is installed.
     private func startLanguageServerFlow() {
         guard openOptions.lspEnabled,
               let fileURL,
@@ -166,10 +167,6 @@ final class TextDocument: NSDocument {
         else { return }
 
         let availability = LanguageServerLocator.resolve(language: language)
-        MissingLSPServerNotification.shared.handleDocumentOpen(
-            language: language,
-            availability: availability
-        )
         LanguageServerPool.shared.documentOpened(
             fileURL: fileURL,
             initialText: text,

@@ -492,4 +492,53 @@ import Testing
         #expect(result.diagnostics.first?.languageID == "ruby")
         #expect(result.diagnostics.first?.entryIndex == 1)
     }
+
+    // MARK: - Provenance (#51)
+
+    @Test func bundledOnlyLoadHasNoUserConfiguredLanguageIDs() {
+        let result = LanguageConfigLoader.load(userConfigAt: nil)
+
+        #expect(result.userConfiguredLanguageIDs.isEmpty)
+    }
+
+    @Test func userLanguageEntryIsRecordedAsUserConfigured() {
+        let result = loadInline("""
+        [[language]]
+        extensions = ["json"]
+        languageId = "json"
+        grammar = "json"
+        """)
+
+        #expect(result.userConfiguredLanguageIDs == ["json"])
+        // The override still wins the merge; provenance is not a second registry.
+        #expect(result.registry.language(forLanguageID: "json") != nil)
+    }
+
+    @Test func userKnownServerEntryIsNotRecordedAsUserLanguageConfig() {
+        let result = loadInline("""
+        [[knownServer]]
+        extensions = ["rb"]
+        languageId = "ruby"
+        candidates = ["ruby-lsp"]
+        """)
+
+        #expect(result.userConfiguredLanguageIDs.isEmpty)
+        #expect(result.registry.language(forLanguageID: "ruby")?.binaryAlternatives == ["ruby-lsp"])
+    }
+
+    @Test func skippedUserEntryDoesNotClaimProvenance() {
+        let result = loadInline("""
+        [[language]]
+        extensions = []
+        languageId = "python"
+        grammar = "python"
+        binaryName = "pylsp"
+        """)
+
+        #expect(result.userConfiguredLanguageIDs.isEmpty)
+        // The bundled catalog entry survives the skipped override.
+        #expect(result.registry.language(forLanguageID: "python")?.binaryAlternatives == [
+            "pylsp", "pyright-langserver"
+        ])
+    }
 }
