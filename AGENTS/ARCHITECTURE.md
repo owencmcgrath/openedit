@@ -198,6 +198,119 @@ Diagnostics are the errors/warnings/hints a language server reports about the op
 
 **[Decided]** The app hides its Dock icon while it has no document windows open, and shows it again as soon as a document window exists. The process deliberately outlives its windows (`applicationShouldTerminateAfterLastWindowClosed` returns `false` — the CLI shim, file watcher, and LSP pool all live in it), so an idle, windowless app should not keep occupying the Dock. `DockPresenceController` maps open-document-window count to `NSApplication.ActivationPolicy`: `.regular` while at least one document window exists, `.accessory` (no Dock icon, no menu bar, still reachable via the app switcher and the CLI) once they are all gone. **Only document windows count** — the Settings window (#8) is a transient auxiliary surface and does not keep the app in the Dock. Miniaturized document windows still count, so the icon never disappears while a window the user can only restore from the Dock remains. Reopening a window is the existing CLI/`open`-event path (#2/#15); no menu-bar status item is added. While hidden, the bare-executable Untitled backstop in `AppDelegate.applicationDidBecomeActive` is suppressed so activating a windowless app from the app switcher does not resurrect a window (owner decisions, #32). **[Implemented #39]** When the last document window closes while the app is frontmost and no other window remains on screen, the app drops off the front entirely instead of lingering as an active-but-invisible accessory: `DockPresenceController` hides it (`NSApp.hide(nil)` right after the `.accessory` policy change), which makes macOS re-activate the previously active app — e.g. the terminal that launched it. The hide is skipped while any other window remains (e.g. Settings, which does not count as a document window; the closing window's own transient children — its hover popover, a sheet — do not count either, since they are dismissed with their anchor) or the app is not the active app. The hand-off is not a one-shot on the `.regular → .accessory` transition: every window's close recomputes (not only document windows'), and the decision also fires when the policy is already `.accessory`, so a close that was vetoed by a remaining window still hands focus back once that last window itself closes instead of leaving the app active-but-invisible. The restore-to-`.regular` path unhides before activating so a reopened document window comes back on screen, and stays gated on an actual policy change so routine key/main recomputes remain focus-neutral. Rejected: `.prohibited` (removes the app switcher entry too, making it harder to reach a windowless app); an always-regular app (the status quo this issue exists to change).
 
+### 5.15 Control channel (`OpenEditControl` → `openedit-mcp`)
+
+**[Decided]** OpenEdit exposes a narrow, local, request/response control channel so an MCP server can read editor state that no existing surface can return. The app is the server; `openedit-mcp` is the only client. It is not a public API: it is filesystem-local, user-only, and versioned.
+
+**Transport.** One JSON object per line (NDJSON), UTF-8, no Content-Length header. Maximum line length 64 MiB — the same bound as `JSONRPCFraming.maximumFrameLength` — and a larger response fails with `payload_too_large` rather than truncating. Unknown object members are ignored on decode, matching `OpenURLInterpreter`'s forward-compatibility rule. Both sides resolve the directory through `FileManager.default.temporaryDirectory` (not the raw `TMPDIR` string) so the path agrees between LaunchServices and shell contexts.
+
+**Socket and lifecycle.**
+
+- Path: `$TMPDIR/openedit-<uid>/control.sock`; the directory is created mode 0700 and the socket mode 0600.
+- The app binds on launch and removes the socket and directory on quit.
+- On bind, an existing path is probed with a connect. A successful connect means another live instance owns it, so this instance runs without a control server and logs one diagnostic. A refused connect means the socket is stale: unlink and bind.
+- One stable socket per user; the first live instance owns it. Multi-instance routing is deferred. A missing or refused socket is the stable client-side error "OpenEdit is not running", never a wire error.
+- Up to 8 concurrent connections. Requests on one connection are handled serially in arrival order; ordering across connections is not defined.
+
+**Handshake.** The first request on every connection is `initialize`:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"client":{"name":"openedit-mcp","version":"0.1.0"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"appVersion":"0.1.0","pid":1234,"socketPath":"/var/folders/…/openedit-501/control.sock"}}
+```
+
+A mismatched `protocolVersion` returns `-32005 protocol_version_mismatch` and the server closes the connection. Any request before `initialize` is `-32600`.
+
+**Envelope.** JSON-RPC 2.0, matching `JSONRPCMessage`: `jsonrpc`, `id`, `method`, `params`, `result`, `error`. `id` is a client-generated integer, unique per connection. There are no notifications or server-initiated requests in v1.
+
+**Errors.** Standard codes `-32700 parse`, `-32600 invalid request`, `-32601 method not found`, `-32602 invalid params`, `-32603 internal`; domain codes `-32001 document_not_found`, `-32002 active_document_unavailable`, `-32003 timeout`, `-32004 not_implemented`, `-32005 protocol_version_mismatch`, `-32006 payload_too_large`. `error.data.reason` is the stable machine string (for example `"document_not_found"`), `error.message` is human text, and `error.data.detail` is optional:
+
+```json
+{"jsonrpc":"2.0","id":8,"error":{"code":-32001,"message":"No open document matches /tmp/missing.py","data":{"reason":"document_not_found","detail":"/tmp/missing.py"}}}
+```
+
+**Coordinates.** Lines are 1-based; columns are 1-based UTF-16 code-unit offsets. This is `TextPosition`'s semantics, shared with the CLI and `openedit://`. LSP's zero-based `LSPPosition` is converted only at the LSP boundary (`LSPPosition(utf16Offset:in:)` and its inverse), and no message mixes the two.
+
+**Document identity.** Every open document has a `documentId` (UUID string) assigned when it opens. Requests accept `documentId` or `path`; `path` matches the standardized file URL, so it is absent for untitled/scratch documents. Omitting both selects the active document: the document in `NSApp.keyWindow` when that window belongs to a `DocumentWindowController`, else the frontmost document window in `NSApp.orderedWindows`, and `-32002` when there is none. Documents and windows are not 1:1 (tabbing), so v1 exposes no window identifier.
+
+**Methods.** Control method → MCP tool:
+
+| Control method | MCP tool |
+|---|---|
+| `open` | `open` |
+| `listDocuments` | `list_documents` |
+| `readDocument` | `read_document` |
+| `getSelection` | `get_selection` |
+| `getDiagnostics` | `get_diagnostics` |
+| `getHover` | `get_hover` |
+
+**`open`.** Params: `path` (required, absolute), `line`, `column`, `endLine`, `endColumn`, `intent` (`reuse` default, or `new`), `readOnly` (default false), `scratch` (default false), `activate` (default true). `activate: false` maps to the existing `background` option and does not bring OpenEdit forward. One target per call. The selection is assembled exactly like the CLI: a single position is a caret at `(line, column ?? 1)`; a range runs from `(line, column?)` to `(endLine, endColumn?)`, resolved with `TextSelectionResolver` (clamped, swapped if inverted). A relative path is `-32602`. The call waits until the document is open and the selection applied, otherwise `-32003`; placement is `OpenPlacementRouter`'s, unchanged.
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"open","params":{"path":"/Users/me/project/main.py","line":42,"column":5,"intent":"reuse"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":2,"result":{"documentId":"6F1C9E4A-…","path":"/Users/me/project/main.py","title":"main.py","active":true}}
+```
+
+**`listDocuments`.** Params: `{}`. Result: `documents` — `[{documentId, path?, title, dirty, active, scratch}]`. The order is document windows front-to-back (`NSApp.orderedWindows`), then any remaining open documents.
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"listDocuments","params":{}}
+```
+
+```json
+{"jsonrpc":"2.0","id":3,"result":{"documents":[{"documentId":"6F1C9E4A-…","path":"/Users/me/project/main.py","title":"main.py","dirty":false,"active":true,"scratch":false}]}}
+```
+
+**`readDocument`.** Params: `documentId` or `path`; omit both for the active document. Result: `documentId`, `path?`, `title`, `text`, `dirty`, `active`. `text` is the in-memory buffer (`TextDocument.text`), including unsaved edits; the call never writes to disk.
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"readDocument","params":{"documentId":"6F1C9E4A-…"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":4,"result":{"documentId":"6F1C9E4A-…","path":"/Users/me/project/main.py","title":"main.py","text":"import os\n…","dirty":true,"active":true}}
+```
+
+**`getSelection`.** Params: `documentId` or `path`; omit both for the active document. Result: `documentId`, `selection` — `{start:{line, column}, end:{line, column}}`. A caret is `start == end`, and columns are always concrete.
+
+```json
+{"jsonrpc":"2.0","id":5,"method":"getSelection","params":{}}
+```
+
+```json
+{"jsonrpc":"2.0","id":5,"result":{"documentId":"6F1C9E4A-…","selection":{"start":{"line":42,"column":5},"end":{"line":44,"column":1}}}}
+```
+
+**`getDiagnostics`.** Params: `documentId` or `path`; omit both for the active document. Result: `documentId`, `languageServer` (`available` | `missing` | `highlightingOnly`), `version?`, `diagnostics` — `[{range:{start:{line,column}, end:{line,column}}, severity, message, source?}]`. `severity` is `error` | `warning` | `information` | `hint`, mapped from LSP's numeric severity. The call reads the same `DocumentDiagnostics` the UI renders and excludes stale-version publishes. No server → empty array plus status, not an error.
+
+```json
+{"jsonrpc":"2.0","id":6,"method":"getDiagnostics","params":{}}
+```
+
+```json
+{"jsonrpc":"2.0","id":6,"result":{"documentId":"6F1C9E4A-…","languageServer":"available","version":7,"diagnostics":[{"range":{"start":{"line":42,"column":5},"end":{"line":42,"column":9}},"severity":"error","message":"Undefined name 'foo'","source":"pyright"}]}}
+```
+
+**`getHover`.** Params: `documentId` or `path`, plus required `line` and `column`. Result: `documentId`, `languageServer`, `contents` (string or null). Delegates to `LSPProcessPool.requestHover(fileURL:position:)`; hover is already flattened to plain text by `LSPHover.plainText` (Markdown `kind` ignored). No server or no result → `null`, never an error. A position past the end of the document is `-32602`.
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"getHover","params":{"line":42,"column":6}}
+```
+
+```json
+{"jsonrpc":"2.0","id":7,"result":{"documentId":"6F1C9E4A-…","languageServer":"available","contents":"(variable) foo: int"}}
+```
+
+**Timeouts.** Client-side: `open` 10 s (CLI parity), `getHover` 5 s, all others 2 s. On expiry the client returns `-32003 timeout` and drops any late response by id. No `$/cancelRequest` in v1.
+
+**Out of scope (phase 2).** Mutating methods (edit/save/close), notifications/subscriptions, MCP resources, window identifiers, per-instance sockets, and authentication tokens. Directory 0700 + socket 0600 + same-uid is the boundary; the app has no sandbox (§6).
+
 ## 6. Key Decisions (rationale + rejected alternatives)
 
 **No App Sandbox / no App Store.** LSP servers are arbitrary third-party executables (installed via npm/pip/brew, in unpredictable locations); the sandbox does not permit spawning those. Panic hit the identical wall with Nova and shipped Developer-ID-only for the same reason. Rejected: a Mac-App-Store build with only bundled/self-compiled LSPs — possible, but turns "point at whatever's installed" into "vendor and update every language server yourself," which cuts against the actual use case (working alongside whatever LSPs the user already has for their agent workflow).
